@@ -3,6 +3,16 @@ import torch.nn.functional as F
 from enum import Enum
 import numpy as np
 from scipy.stats import gamma
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from the .env file
+load_dotenv()
+
+# Access the PYTHONPATH variable
+PYTHONPATH = os.getenv('PYTHONPATH')
+DATAPATH = PYTHONPATH + '/data'
+
 
 #### Enum for pretty code ####
 class AggregationType(Enum):
