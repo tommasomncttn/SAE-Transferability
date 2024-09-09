@@ -153,7 +153,7 @@ def get_substitution_loss(tokens, model, sae, sae_layer):
     loss_clean, cache = model.run_with_cache(tokens, names_filter = [sae_layer], return_type="loss")
     original_activations = cache[sae_layer]
 
-    # Use these to get 'post_reconstructed' (for both autoencoder A and B). We need to reshape back to (batch, seq) first
+    # return the output of the decoder of the sea, expected shape == shape(original_activations)
     post_reconstructed = sae.forward(original_activations)
     
     # Define hook fn to replace activations with different values
