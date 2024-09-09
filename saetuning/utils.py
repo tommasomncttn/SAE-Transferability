@@ -168,4 +168,8 @@ def get_substitution_loss(tokens, model, sae, sae_layer):
         fwd_hooks=[(sae_layer, partial(hook_function, new_activations=post_reconstructed))],
     )
 
+    # clean the memory
+    del original_activations, post_reconstructed, cache
+    torch.cuda.empty_cache()
+
     return loss_clean, loss_reconstructed
