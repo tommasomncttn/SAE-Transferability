@@ -161,7 +161,7 @@ def get_substitution_loss(tokens, model, sae, sae_layer):
         activations[:] = new_activations
         return activations
 
-    # Run the hook function in 3 different cases: sae A's reconstructions, B's reconstructions, and zero-ablation
+    # just run the model again to get the loss after we substitute the new activation (nb: different with .run_with_cache as return only the loss)
     loss_reconstructed = model.run_with_hooks(
         tokens,
         return_type="loss",
