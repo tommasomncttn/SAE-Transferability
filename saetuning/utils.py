@@ -91,29 +91,32 @@ def L0_loss(x, threshold=1e-8):
 
 import plotly.graph_objs as go
 
-def plot_density(feature_acts, num_bins=100):
+def plot_log10_hist(y_data, y_value, num_bins=100, first_bin_name = 'First bin value', 
+                    y_scalar=1.5, y_scale_bin=-2, log_epsilon=1e-10):
     """
-    Expects a tensor feature_acts of shape [N_TOKENS, N_SAE].
-    
     Computes the histogram using PyTorch and plots the feature density diagram with log-10 scale using Plotly.
-    (see https://transformer-circuits.pub/2023/monosemantic-features#appendix-feature-density)
+    Y-axis is clipped to the value of the second-largest bin to prevent suppression of smaller values.
     """
     # Flatten the tensor
-    feature_acts_flat = torch.flatten(feature_acts)
+    y_data_flat = torch.flatten(y_data)
 
     # Compute the logarithmic transformation using PyTorch
-    log_feature_acts_flat = torch.log10(torch.abs(feature_acts_flat) + 1e-10).detach().cpu()
+    log_y_data_flat = torch.log10(torch.abs(y_data_flat) + log_epsilon).detach().cpu()
 
     # Compute histogram using PyTorch
-    hist_min = torch.min(log_feature_acts_flat).item()
-    hist_max = torch.max(log_feature_acts_flat).item()
+    hist_min = torch.min(log_y_data_flat).item()
+    hist_max = torch.max(log_y_data_flat).item()
     hist_range = hist_max - hist_min
     bin_edges = torch.linspace(hist_min, hist_max, num_bins + 1)
-    hist_counts, _ = torch.histogram(log_feature_acts_flat, bins=bin_edges)
+    hist_counts, _ = torch.histogram(log_y_data_flat, bins=bin_edges)
 
     # Convert data to NumPy for Plotly
     bin_edges_np = bin_edges.detach().cpu().numpy()
     hist_counts_np = hist_counts.detach().cpu().numpy()
+
+    # Find the largest and second-largest bin values
+    first_bin_value = hist_counts_np[0]
+    second_largest_bin_value = sorted(hist_counts_np)[y_scale_bin]  # Get the second largest bin value (by default)
 
     # Prepare the Plotly plot
     fig = go.Figure(
@@ -124,17 +127,31 @@ def plot_density(feature_acts, num_bins=100):
         )]
     )
 
-    # Update the layout for the plot
+    # Update the layout for the plot, clipping the y-axis at the second largest bin value
     fig.update_layout(
-        title="SAE Feature Density Diagram",
-        xaxis_title="Log10 of Feature Activations",
+        title=f"SAE Features {y_value} histogram ({first_bin_name}: {first_bin_value:.2e})",
+        xaxis_title=f"Log10 of {y_value}",
         yaxis_title="Density",
+        yaxis_range=[0, second_largest_bin_value * y_scalar],  # Clipping to the second-largest value by default
         bargap=0.2,
         bargroupgap=0.1,
     )
 
+    # Add an annotation to display the value of the first bin
+    fig.add_annotation(
+        text=f"{first_bin_name}: {first_bin_value:.2e}",
+        xref="paper", yref="paper",
+        x=0.95, y=0.95,
+        showarrow=False,
+        font=dict(size=12, color="red"),
+        bgcolor="white",
+        bordercolor="black",
+        borderwidth=1
+    )
+
     # Show the plot
     fig.show()
+
 
 from transformer_lens import HookedTransformer
 from functools import partial
