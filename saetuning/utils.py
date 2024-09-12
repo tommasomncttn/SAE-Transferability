@@ -156,37 +156,47 @@ def plot_log10_hist(y_data, y_value, num_bins=100, first_bin_name = 'First bin v
 from transformer_lens import HookedTransformer
 from functools import partial
 
-def get_substitution_loss(tokens, model, sae, sae_layer):
+def get_substitution_loss(tokens, model, sae, sae_layer, reconstruction_metric=None):
     '''
-    Expects a tensor of input tokens of shape [N_BATCHES, N_CONTEXT] (e.g. sampled from the Activation Store).
+    Expects a tensor of input tokens of shape [N_BATCHES, N_CONTEXT].
 
     Returns two losses:
     1. Clean loss - loss of the normal forward pass of the model at the input tokens
     2. Substitution loss - loss when substituting SAE reconstructions of the residual stream at the SAE layer of the model
     '''
     batch_size, seq_len = tokens.shape
+    
+    # Run the model with cache to get the original activations and clean loss
+    loss_clean, cache = model.run_with_cache(tokens, names_filter=[sae_layer], return_type="loss")
 
-    # Get the post activations from the clean run (and get the clean loss)
-    loss_clean, cache = model.run_with_cache(tokens, names_filter = [sae_layer], return_type="loss")
+    # Fetch and detach the original activations
     original_activations = cache[sae_layer]
 
-    # return the output of the decoder of the sea, expected shape == shape(original_activations)
+    # Get the SAE reconstructed activations (forward pass through SAE)
     post_reconstructed = sae.forward(original_activations)
-    
-    # Define hook fn to replace activations with different values
+
+    # Update the reconstruction quality metric (e.g. R2 score/variance explained)
+    if reconstruction_metric:
+        reconstruction_metric.update(post_reconstructed.flatten(), original_activations.flatten())
+
+    # Clear the cache and unused variables early
+    del original_activations, cache
+    torch.cuda.empty_cache()
+
+    # Hook function to substitute activations in-place
     def hook_function(activations, hook, new_activations):
-        activations[:] = new_activations
+        activations.copy_(new_activations)  # In-place copy to save memory
         return activations
 
-    # just run the model again to get the loss after we substitute the new activation (nb: different with .run_with_cache as return only the loss)
+    # Run model again with hooks to substitute activations and get the substitution loss
     loss_reconstructed = model.run_with_hooks(
         tokens,
         return_type="loss",
-        fwd_hooks=[(sae_layer, partial(hook_function, new_activations=post_reconstructed))],
+        fwd_hooks=[(sae_layer, partial(hook_function, new_activations=post_reconstructed))]
     )
 
-    # clean the memory
-    del original_activations, post_reconstructed, cache
+    # Clean up reconstructed activations and free up memory
+    del post_reconstructed
     torch.cuda.empty_cache()
 
     return loss_clean, loss_reconstructed
