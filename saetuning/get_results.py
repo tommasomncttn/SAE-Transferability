@@ -25,13 +25,57 @@ import logging
 
 
 ### set this args with argparse, now hardcoded
+GEMMA=False
 
-N_CONTEXT = 1024 # number of context tokens to consider
-N_BATCHES = 128 # number of batches to consider
-TOTAL_BATCHES = 10 
-BASE_MODEL = "google/gemma-2b"
-FINETUNE_MODEL = 'shahdishank/gemma-2b-it-finetune-python-codes'
-DATASET_NAME = "ctigges/openwebtext-gemma-1024-cl"
+if GEMMA == True:
+    N_CONTEXT = 1024 # number of context tokens to consider
+    N_BATCHES = 128 # number of batches to consider
+    TOTAL_BATCHES = 20 
+
+    RELEASE = 'gemma-2b-res-jb'
+    BASE_MODEL = "google/gemma-2b"
+    FINETUNE_MODEL = 'shahdishank/gemma-2b-it-finetune-python-codes'
+    DATASET_NAME = "ctigges/openwebtext-gemma-1024-cl"
+    hook_part = 'post'
+    layer_num = 6
+else:
+    N_CONTEXT = 128 # number of context tokens to consider
+    N_BATCHES = 128 # number of batches to consider
+    TOTAL_BATCHES = 100 
+
+    RELEASE = 'gpt2-small-res-jb'
+    BASE_MODEL = "gpt2-small"
+    FINETUNE_MODEL = 'pierreguillou/gpt2-small-portuguese'
+    DATASET_NAME = "Skylion007/openwebtext"
+    hook_part = 'pre'
+    layer_num = 6
+
+@dataclass
+class TokenizerComparisonConfig:
+    # LLMs
+    BASE_MODEL: str
+    FINETUNE_MODEL: str
+
+@dataclass
+class ActivationStoringConfig:
+    # LLMs
+    BASE_MODEL: str
+    FINETUNE_MODEL: str
+
+    # dataset
+    DATASET_NAME: str
+    N_CONTEXT: int
+    N_BATCHES: int
+    TOTAL_BATCHES: int
+
+    # SAE configs
+    LAYER_NUM : int 
+    SAE_HOOK : str
+
+    # misc
+    DTYPE: torch.dtype = torch.float16
+    IS_DATASET_TOKENIZED: bool = False
+
 
 ### utils function ###
 
@@ -137,33 +181,7 @@ def parse_batches(activation_store, model, LAYER_NUM, SAE_HOOK, TOTAL_BATCHES, d
             return all_acts
     
 
-@dataclass
-class TokenizerComparisonConfig:
-    # LLMs
-    BASE_MODEL: str
-    FINETUNE_MODEL: str
-
-@dataclass
-class SaeActivationStoringConfig:
-    # LLMs
-    BASE_MODEL: str
-    FINETUNE_MODEL: str
-
-    # dataset
-    DATASET_NAME: str
-    IS_DATASET_TOKENIZED: bool = False
-    N_CONTEXT: int
-    N_BATCHES: int
-    TOTAL_BATCHES: int
-
-    # SAE configs
-    LAYER_NUM : int 
-    SAE_HOOK : str
-
-    # misc
-    DTYPE: torch.dtype = torch.float16
-
-def get_activations_for_base_and_ft(cfg: SaeActivationStoringConfig):
+def get_activations_for_base_and_ft(cfg: ActivationStoringConfig):
 
     # STEP 1: Get the device and the python and datapath
     device = get_device()
