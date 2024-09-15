@@ -15,6 +15,19 @@ load_dotenv()
 PYTHONPATH = os.getenv('PYTHONPATH')
 DATAPATH = PYTHONPATH + '/data'
 
+def get_env_var():
+
+    # Load environment variables from the .env file
+    load_dotenv()
+    # Access the PYTHONPATH variable
+    pythonpath = Path(os.getenv('PYTHONPATH'))
+    # Print to verify
+    print(f"PYTHONPATH: {pythonpath}")
+    datapath = pythonpath / 'data'
+    print(f"DATAPATH: {datapath}")
+
+    return pythonpath, datapath
+
 #### torch stuff ####
 def clear_cache():
     gc.collect()
