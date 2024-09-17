@@ -7,6 +7,7 @@ import os
 from dotenv import load_dotenv
 import gc
 from pathlib import Path
+import logging
 
 # Load environment variables from the .env file
 load_dotenv()
@@ -16,7 +17,6 @@ PYTHONPATH = os.getenv('PYTHONPATH')
 DATAPATH = PYTHONPATH + '/data'
 
 def get_env_var():
-
     # Load environment variables from the .env file
     load_dotenv()
     # Access the PYTHONPATH variable
@@ -42,8 +42,34 @@ def get_device():
         device = "cpu"
     return device
     
+#### Logging utils ####
+def setup_logger(log_dir_path: Path, log_name: str):
+    if not os.path.exists(log_dir_path):
+        os.makedirs(log_dir_path)
 
+    # Setup the file-logger
+    logger = logging.getLogger(log_name)
 
+    # Clear any existing handlers to ensure no console logging
+    logger.handlers.clear()
+
+    # Set the log level
+    logger.setLevel(logging.INFO)
+
+    # Create file handler with UTF-8 encoding
+    file_handler = logging.FileHandler(log_dir_path / log_name, encoding='utf-8')
+
+    # Set the logging format
+    formatter = logging.Formatter('%(asctime)s - %(message)s')
+    file_handler.setFormatter(formatter)
+
+    # Add only the file handler to the logger
+    logger.addHandler(file_handler)
+
+    # Disable propagation to prevent any parent loggers from printing to the console
+    logger.propagate = False
+
+    return logger
 
 #### Enum for pretty code ####
 class AggregationType(Enum):
@@ -122,7 +148,7 @@ def L0_loss(x, threshold=1e-8):
 
 import plotly.graph_objs as go
 
-def plot_log10_hist(y_data, y_value, num_bins=100, first_bin_name = 'First bin value', 
+def plot_log10_hist(y_data, y_value, num_bins=100, first_bin_name = 'First bin value',
                     y_scalar=1.5, y_scale_bin=-2, log_epsilon=1e-10):
     """
     Computes the histogram using PyTorch and plots the feature density diagram with log-10 scale using Plotly.
@@ -147,7 +173,7 @@ def plot_log10_hist(y_data, y_value, num_bins=100, first_bin_name = 'First bin v
 
     # Find the largest and second-largest bin values
     first_bin_value = hist_counts_np[0]
-    second_largest_bin_value = sorted(hist_counts_np)[y_scale_bin]  # Get the second largest bin value (by default)
+    scale_bin_value = sorted(hist_counts_np)[y_scale_bin]  # Get the second largest bin value (by default)
 
     # Prepare the Plotly plot
     fig = go.Figure(
@@ -163,7 +189,7 @@ def plot_log10_hist(y_data, y_value, num_bins=100, first_bin_name = 'First bin v
         title=f"SAE Features {y_value} histogram ({first_bin_name}: {first_bin_value:.2e})",
         xaxis_title=f"Log10 of {y_value}",
         yaxis_title="Density",
-        yaxis_range=[0, second_largest_bin_value * y_scalar],  # Clipping to the second-largest value by default
+        yaxis_range=[0, scale_bin_value * y_scalar],  # Clipping to the second-largest value by default
         bargap=0.2,
         bargroupgap=0.1,
     )
@@ -187,7 +213,8 @@ def plot_log10_hist(y_data, y_value, num_bins=100, first_bin_name = 'First bin v
 from transformer_lens import HookedTransformer
 from functools import partial
 
-def get_substitution_loss(tokens, model, sae, sae_layer, reconstruction_metric=None):
+def get_substitution_loss(tokens, model, sae, sae_layer,
+                          reconstruction_metric=None, normalize_activations=True):
     '''
     Expects a tensor of input tokens of shape [N_BATCHES, N_CONTEXT].
 
@@ -195,23 +222,44 @@ def get_substitution_loss(tokens, model, sae, sae_layer, reconstruction_metric=N
     1. Clean loss - loss of the normal forward pass of the model at the input tokens
     2. Substitution loss - loss when substituting SAE reconstructions of the residual stream at the SAE layer of the model
     '''
-    batch_size, seq_len = tokens.shape
-    
     # Run the model with cache to get the original activations and clean loss
     loss_clean, cache = model.run_with_cache(tokens, names_filter=[sae_layer], return_type="loss")
 
     # Fetch and detach the original activations
-    original_activations = cache[sae_layer]
+    original_activations = cache[sae_layer].detach()
+
+    # Convert activations to float32 to prevent overflow
+    original_activations_fp32 = original_activations.to(torch.float32)
 
     # Get the SAE reconstructed activations (forward pass through SAE)
-    post_reconstructed = sae.forward(original_activations)
+    with torch.no_grad():
+        post_reconstructed = sae.forward(original_activations_fp32)
 
-    # Update the reconstruction quality metric (e.g. R2 score/variance explained)
+    # Normalize reconstructed activations to match original activations
+    if normalize_activations:
+        # Compute mean and std of original and reconstructed activations
+        activ_mean = original_activations_fp32.mean()
+        activ_std = original_activations_fp32.std()
+        recon_mean = post_reconstructed.mean()
+        recon_std = post_reconstructed.std()
+
+        post_reconstructed_normalized = (post_reconstructed - recon_mean) / (recon_std + 1e-6) * (activ_std + 1e-6) + activ_mean
+    else:
+        post_reconstructed_normalized = post_reconstructed
+
+    # Convert reconstructed activations back to float16
+    post_reconstructed_fp16 = post_reconstructed_normalized.to(torch.float16)
+
+    # Update the reconstruction quality metric (e.g., R2 score/variance explained)
     if reconstruction_metric:
-        reconstruction_metric.update(post_reconstructed.flatten(), original_activations.flatten())
+        # Flatten and use float32 for better numerical stability
+        reconstruction_metric.update(
+            post_reconstructed_normalized.flatten(),
+            original_activations_fp32.flatten()
+        )
 
     # Clear the cache and unused variables early
-    del original_activations, cache
+    del original_activations, original_activations_fp32, post_reconstructed, post_reconstructed_normalized, cache
     torch.cuda.empty_cache()
 
     # Hook function to substitute activations in-place
@@ -220,14 +268,16 @@ def get_substitution_loss(tokens, model, sae, sae_layer, reconstruction_metric=N
         return activations
 
     # Run model again with hooks to substitute activations and get the substitution loss
-    loss_reconstructed = model.run_with_hooks(
-        tokens,
-        return_type="loss",
-        fwd_hooks=[(sae_layer, partial(hook_function, new_activations=post_reconstructed))]
-    )
+    # Use autocast for higher precision during this pass to prevent overflows
+    with torch.cuda.amp.autocast(enabled=False):
+        loss_reconstructed = model.run_with_hooks(
+            tokens,
+            return_type="loss",
+            fwd_hooks=[(sae_layer, partial(hook_function, new_activations=post_reconstructed_fp16))]
+        )
 
     # Clean up reconstructed activations and free up memory
-    del post_reconstructed
+    del post_reconstructed_fp16
     torch.cuda.empty_cache()
 
     return loss_clean, loss_reconstructed

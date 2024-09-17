@@ -27,14 +27,12 @@ import plotly.graph_objects as go
 
 @dataclass
 class ScoresConfig:
-
     # LLMs
     BASE_MODEL: str
     FINETUNE_MODEL: str
 
     # dataset
     DATASET_NAME: str
-    IS_DATASET_TOKENIZED: bool = False
 
     # SAE configs
     SAE_RELEASE : str
@@ -43,6 +41,7 @@ class ScoresConfig:
 
     # misc
     DTYPE: torch.dtype = torch.float16
+    IS_DATASET_TOKENIZED: bool = False
 
     # sizes for experiments
     SUBSTITUTION_LOSS_BATCH_SIZE: int = 25
@@ -54,6 +53,7 @@ class ScoresConfig:
     STORE_BATCH_SIZE_PROMPTS: int = 8
     TRAIN_BATCH_SIZE_TOKENS: int = 4096
     N_BATCHES_IN_BUFFER: int = 32
+    N_BATCH_TOKENS: int = None # will be computed later
 
 class Experiment(Enum):
     SUBSTITUTION_LOSS = 'SubstitutionLoss'
@@ -61,66 +61,9 @@ class Experiment(Enum):
     FEATURE_ACTS = 'FeatureActs'
     FEATURE_DENSITY = 'FeatureDensity'
 
-def plot_log10_hist(y_data, y_value, num_bins=100, first_bin_name = 'First bin value',
-                    y_scalar=1.5, y_scale_bin=-2, log_epsilon=1e-10):
-    """
-    Computes the histogram using PyTorch and plots the feature density diagram with log-10 scale using Plotly.
-    Y-axis is clipped to the value of the second-largest bin to prevent suppression of smaller values.
-    """
-    # Flatten the tensor
-    y_data_flat = torch.flatten(y_data)
-
-    # Compute the logarithmic transformation using PyTorch
-    log_y_data_flat = torch.log10(torch.abs(y_data_flat) + log_epsilon).detach().cpu()
-
-    # Compute histogram using PyTorch
-    hist_min = torch.min(log_y_data_flat).item()
-    hist_max = torch.max(log_y_data_flat).item()
-    hist_range = hist_max - hist_min
-    bin_edges = torch.linspace(hist_min, hist_max, num_bins + 1)
-    hist_counts, _ = torch.histogram(log_y_data_flat, bins=bin_edges)
-
-    # Convert data to NumPy for Plotly
-    bin_edges_np = bin_edges.detach().cpu().numpy()
-    hist_counts_np = hist_counts.detach().cpu().numpy()
-
-    # Find the largest and second-largest bin values
-    first_bin_value = hist_counts_np[0]
-    scale_bin_value = sorted(hist_counts_np)[y_scale_bin]  # Get the second largest bin value (by default)
-
-    # Prepare the Plotly plot
-    fig = go.Figure(
-        data=[go.Bar(
-            x=bin_edges_np[:-1],  # Exclude the last bin edge
-            y=hist_counts_np,
-            width=hist_range / num_bins,
-        )]
-    )
-
-    # Update the layout for the plot, clipping the y-axis at the second largest bin value
-    fig.update_layout(
-        title=f"SAE Features {y_value} histogram ({first_bin_name}: {first_bin_value:.2e})",
-        xaxis_title=f"Log10 of {y_value}",
-        yaxis_title="Density",
-        yaxis_range=[0, scale_bin_value * y_scalar],  # Clipping to the second-largest value by default
-        bargap=0.2,
-        bargroupgap=0.1,
-    )
-
-    # Add an annotation to display the value of the first bin
-    fig.add_annotation(
-        text=f"{first_bin_name}: {first_bin_value:.2e}",
-        xref="paper", yref="paper",
-        x=0.95, y=0.95,
-        showarrow=False,
-        font=dict(size=12, color="red"),
-        bgcolor="white",
-        bordercolor="black",
-        borderwidth=1
-    )
-
-    # Show the plot
-    fig.show()
+def get_sae_id_and_layer(cfg: ScoresConfig):
+    layer_num, hook_part = cfg.LAYER_NUM, cfg.HOOK_PART
+    return f'blocks.{layer_num}.hook_resid_{hook_part}', layer_num
 
 class FeatureDensityPlotter:
     def __init__(self, n_features, n_tokens, activation_threshold=1e-10, num_bins=100):
@@ -153,61 +96,154 @@ class FeatureDensityPlotter:
 #### Loss functions
 
 
-def get_L0_loss():
+def compute_score(model, sae, experiment: Experiment, batch_size_prompts, total_batches_dict, cfg: ScoresConfig,
+                  activation_store=None, tokens_path=''):
     try:
-        pass # try to load the file
-    except:
+        all_tokens = torch.load(tokens_path)
+        base_model_run = False
+
+        def get_tokens(k):
+            """Returns the tokens for the k-th outer batch, where 0 <= k < TOTAL_BATCHES"""
+            start_idx = k * batch_size_prompts
+            end_idx = (k + 1) * batch_size_prompts
+
+            # Get the corresponding batch of tokens from all_tokens
+            tokens = all_tokens[start_idx:end_idx]  # [N_BATCH, N_CONTEXT]
+            return tokens
+        
+    except FileNotFoundError:
+        assert activation_store is not None, 'Activation store must be passed when running this function for the 1st time (i.e. for the base model)'
+        base_model_run = True
+
+        def get_tokens(k):
+            """Returns the tokens sampled from the activation store"""
+            # Get the corresponding batch of tokens from all_tokens
+            tokens = activation_store.get_batch_tokens()  # [N_BATCH, N_CONTEXT]
+            return tokens
     
+    def get_batch_size(key: Experiment):
+        return total_batches_dict[key]
+    
+    total_batches = get_batch_size(experiment)
+    if base_model_run:
+        all_tokens = []
 
+    score_function = experiment_to_function(experiment)
+    *scores, tokens_dataset = score_function(model, sae, total_batches, get_tokens, base_model_run, cfg)
 
+    if base_model_run:
+        torch.save(tokens_dataset, tokens_path)
+
+    return scores
+
+def experiment_to_function(experiment: Experiment):
+    """All function that compute score must have the following signature:
+        (model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig) -> *, Optional[tokens_sample]
+    """
+    if experiment == Experiment.L0_LOSS:
+        return get_L0_loss
+    elif experiment == Experiment.SUBSTITUTION_LOSS:
+        return get_substitution_and_reconstruction_losses
+    elif experiment == Experiment.FEATURE_ACTS:
+        return get_feature_activations
+    elif experiment == Experiment.FEATURE_DENSITY:
+        return get_feature_densities
+
+def get_L0_loss(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig):
+    sae_id, layer_num = get_sae_id_and_layer(cfg)
+    if base_model_run:
+        all_tokens = []
+
+    all_L0 = []
+
+    for k in tqdm(range(total_batches)):
+        # Get a batch of tokens from the dataset
+        tokens = get_tokens(k)  # [N_BATCH, N_CONTEXT]
+
+        # Store tokens for later reuse
+        if base_model_run:
+            all_tokens.append(tokens)
+
+        # Run the model and store the activations
+        _, cache = model.run_with_cache(tokens, stop_at_layer=layer_num + 1, \
+                                             names_filter=[sae_id])  # [N_BATCH, N_CONTEXT, D_MODEL]
+
+        # Get the activations from the cache at the sae_id
+        original_activations = cache[sae_id]
+
+        # Encode the activations with the SAE
+        feature_activations = sae.encode_standard(original_activations) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
+        feature_activations.to('cpu')
+
+        # Store the encoded activations
+        all_L0.append(L0_loss(feature_activations))
+
+        # Explicitly free up memory by deleting the cache and emptying the CUDA cache
+        del cache
+        del original_activations
+        del feature_activations
+        torch.cuda.empty_cache()
+
+    tokens_dataset = torch.cat(all_tokens) if base_model_run else None
+    l0_loss = torch.tensor(all_L0).mean()
+
+    return l0_loss, tokens_dataset
+
+def get_substitution_and_reconstruction_losses(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig):
+    sae_id, layer_num = get_sae_id_and_layer(cfg)
+    if base_model_run:
+        all_tokens = []
+
+    tokens_dataset = torch.cat(all_tokens) if base_model_run else None
+    return None, tokens_dataset
+
+def get_feature_activations(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig):
+    sae_id, layer_num = get_sae_id_and_layer(cfg)
+    if base_model_run:
+        all_tokens = []
+
+    tokens_dataset = torch.cat(all_tokens) if base_model_run else None
+    return None, tokens_dataset
+
+def get_feature_densities(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig):
+    sae_id, layer_num = get_sae_id_and_layer(cfg)
+    if base_model_run:
+        all_tokens = []
+
+    tokens_dataset = torch.cat(all_tokens) if base_model_run else None
+    return None, tokens_dataset
 
 ### Main function
-
 def compute_scores(cfg: ScoresConfig):
-
     # get some info for experiments and some functions
-
-    TOTAL_BATCHES = {
+    TOTAL_BATCHES_DICT = {
         Experiment.SUBSTITUTION_LOSS: cfg.SUBSTITUTION_LOSS_BATCH_SIZE,
         Experiment.L0_LOSS: cfg.L0_LOSS_BATCH_SIZE,
         Experiment.FEATURE_ACTS: cfg.FEATURE_ACTS_BATCH_SIZE,
         Experiment.FEATURE_DENSITY: cfg.FEATURE_DENSITY_BATCH_SIZE
     }
 
-    TOKENS_SAMPLE = {
-        Experiment.SUBSTITUTION_LOSS: [],
-        Experiment.L0_LOSS: [],
-        Experiment.FEATURE_ACTS: [],
-        Experiment.FEATURE_DENSITY: []
-    }
-
-    def get_batch_size(key: Experiment):
-        return TOTAL_BATCHES[key]
-
-    def get_tokens_sample(key: Experiment):
-        return TOKENS_SAMPLE[key]
-
-    def set_tokens_sample(key: Experiment, token_sample):
-        TOKENS_SAMPLE[key] = token_sample
+    # Define the saving names
+    saving_name_base = cfg.BASE_MODEL if "/" not in cfg.BASE_MODEL else cfg.BASE_MODEL.split("/")[-1]
+    saving_name_ft = cfg.FINETUNE_MODEL if "/" not in cfg.FINETUNE_MODEL else cfg.FINETUNE_MODEL.split("/")[-1]
+    saving_name_ds = cfg.DATASET_NAME if "/" not in cfg.DATASET_NAME else cfg.DATASET_NAME.split("/")[-1]
 
     # load the base model
     device = get_device()
     base_model = HookedSAETransformer.from_pretrained(cfg.BASE_MODEL, device=device, dtype=cfg.DTYPE)
 
     # define the sae_id and the import the SAE
-    sae_id = f'blocks.{cfg.LAYER_NUM}.hook_resid_{cfg.HOOK_PART}'
-
+    sae_id, _ = get_sae_id_and_layer(cfg)
     sae, cfg_dict, sparsity = SAE.from_pretrained(
                             release = cfg.SAE_RELEASE,
                             sae_id = sae_id,
                             device = device
     )
-
     assert(cfg_dict["activation_fn_str"] == "relu")
 
     # get the activations store
     activation_store = ActivationsStore.from_sae(
-        model=cfg.BASE_MODEL,
+        model=base_model,
         sae=sae,
         streaming=True,
         # fairly conservative parameters here so can use same for larger
@@ -221,7 +257,41 @@ def compute_scores(cfg: ScoresConfig):
     # compute the sizes for the experiments
     batch_size_prompts = activation_store.store_batch_size_prompts
     batch_size_tokens = activation_store.context_size * batch_size_prompts
+    cfg.N_BATCH_TOKENS = batch_size_tokens
 
-    # write a function for loss computation for the base model, which check if file exists and import or compute from scratch
+    # setup the logger
+    _, datapath = get_env_var()
+    log_path = datapath / 'log'
+    logger = setup_logger(log_path, f'sae_scores_{saving_name_base}_vs_{saving_name_ft}')
 
-    
+    ## BASE model ##
+    logger.info('SAE scores on the BASE model:')
+
+    ### L0 loss ###
+    l0_loss_tokens_path = datapath / f'L0_loss_tokens_{saving_name_base}.pt'
+    l0_loss = compute_score(base_model, sae, Experiment.L0_LOSS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
+                            activation_store=activation_store, tokens_path=l0_loss_tokens_path)
+    logger.info(f'L0 loss = {l0_loss[0].item()}')
+
+    ## Finetune model ##
+    # Offload the base model
+    del base_model, activation_store
+    clear_cache()
+
+    # Load the finetune model
+    finetune_model_hf = AutoModelForCausalLM.from_pretrained(cfg.FINETUNE_MODEL)
+    finetune_model = HookedSAETransformer.from_pretrained(cfg.BASE_MODEL, device=device, 
+                                                          hf_model=finetune_model_hf, dtype=cfg.DTYPE)
+    del finetune_model_hf
+    clear_cache()
+
+    logger.info('SAE scores on the FINETUNE model:')
+    ### L0 loss ###
+    l0_loss = compute_score(finetune_model, sae, Experiment.L0_LOSS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
+                            tokens_path=l0_loss_tokens_path)
+    logger.info(f'L0 loss = {l0_loss[0].item()}')
+
+
+    # Ensure the log is flushed
+    for handler in logger.handlers:
+        handler.flush()
