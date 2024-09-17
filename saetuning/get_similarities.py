@@ -21,33 +21,35 @@ import logging
 import torch 
 import torch.nn.functional as F
 from utils import *
+from enum import Enum
+
+class Similarity(Enum):
+    COSINE = 'Cosine_Similarity'
+    EUCLEDIAN_DISTANCE = 'L2_distance'
 
 @dataclass
-class TokenizerComparisonConfig:
-
+class SimilaritiesConfig:
     BASE_MODEL: str
     FINETUNE_MODEL: str
-    DATASET_NAME: str
+    FINETUNE_DATASET_NAME: str
     BASE_ACTIVATIONS: torch.Tensor
     FINETUNE_ACTIVATIONS: torch.Tensor
 
-def compute_similarities_of_activations(cfg: TokenizerComparisonConfig):
-    
+def compute_similarities_of_activations(cfg: SimilaritiesConfig):
     # get some info for the paths and devices
     device = get_device()
     pythonpath, datapath = get_env_var()
     saving_name_base = cfg.BASE_MODEL if "/" not in cfg.BASE_MODEL else cfg.BASE_MODEL.split("/")[-1]
     saving_name_ft = cfg.FINETUNE_MODEL if "/" not in cfg.FINETUNE_MODEL else cfg.FINETUNE_MODEL.split("/")[-1]
-    saving_name_ds = cfg.DATASET_NAME if "/" not in cfg.DATASET_NAME else cfg.DATASET_NAME.split("/")[-1]
-
+    saving_name_ds = cfg.FINETUNE_DATASET_NAME if "/" not in cfg.FINETUNE_DATASET_NAME else cfg.FINETUNE_DATASET_NAME.split("/")[-1]
 
     # store the activations
     base_activations = cfg.BASE_ACTIVATIONS.to(device)
     finetune_activations = cfg.FINETUNE_ACTIVATIONS.to(device)
 
     # create the saving paths
-    saving_path_euclidean = datapath + f"/euclidean_similarity_{saving_name_base}_{saving_name_ft}_on_{saving_name_ds}.pt"
-    saving_path_cosine = datapath + f"/cosine_similarity_{saving_name_base}_{saving_name_ft}_on_{saving_name_ds}.pt"
+    saving_path_euclidean = datapath / f"euclidean_similarity_{saving_name_base}_{saving_name_ft}_on_{saving_name_ds}.pt"
+    saving_path_cosine = datapath / f"cosine_similarity_{saving_name_base}_{saving_name_ft}_on_{saving_name_ds}.pt"
     
     # Call the functions to compute cosine similarity and Euclidean distance
     cosine_similarity = compute_cosine_similarity(base_activations, finetune_activations)
@@ -57,6 +59,10 @@ def compute_similarities_of_activations(cfg: TokenizerComparisonConfig):
     torch.save(cosine_similarity, saving_path_cosine)
     torch.save(euclidean_distance, saving_path_euclidean)
 
+    return {
+        Similarity.COSINE: cosine_similarity,
+        Similarity.EUCLEDIAN_DISTANCE: euclidean_distance
+    }
 
 # 1. Plot heatmap of similarity metric
 def plot_similarity_heatmap(ST):
@@ -80,7 +86,7 @@ def plot_token_histogram(ST):
     fig.show()
 
 # 4. Reduce ST across batch dimension to [N_CONTEXT] and plot line plot across context
-def plot_context_line(ST):
+def plot_context_line(ST, N_CONTEXT):
     context_mean_similarity = torch.mean(ST, dim=0).cpu().numpy()  # Shape [N_CONTEXT]
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=list(range(N_CONTEXT)), y=context_mean_similarity,
@@ -94,3 +100,4 @@ def report_global_mean(ST):
     global_mean_similarity = torch.mean(ST).item()
     print(f"Global mean similarity: {global_mean_similarity}")
 
+    return global_mean_similarity
