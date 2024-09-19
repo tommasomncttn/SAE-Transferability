@@ -23,6 +23,9 @@ import torch.nn.functional as F
 from utils import *
 from enum import Enum
 
+# GPU memory saver (this script doesn't need gradients computation)
+torch.set_grad_enabled(False)
+
 class Similarity(Enum):
     COSINE = 'Cosine_Similarity'
     EUCLEDIAN_DISTANCE = 'L2_distance'

@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from tqdm import tqdm
 import logging
 
+# GPU memory saver (this script doesn't need gradients computation)
+torch.set_grad_enabled(False)
+
 ######################
 # Configs definition #
 ######################
@@ -343,3 +346,53 @@ def compare_tokenizers(cfg: TokenizerComparisonConfig):
     logger.info(str(summary_df))
 
     return summary_df
+
+if __name__ == "__main__":
+    ### set this args with argparse, now hardcoded
+    GEMMA=False
+
+    if GEMMA == True:
+        N_CONTEXT = 1024 # number of context tokens to consider
+        N_BATCHES = 128 # number of batches to consider
+        TOTAL_BATCHES = 20 
+
+        RELEASE = 'gemma-2b-res-jb'
+        BASE_MODEL = "google/gemma-2b"
+        FINETUNE_MODEL = 'shahdishank/gemma-2b-it-finetune-python-codes'
+        BASE_TOKENIZER_NAME = BASE_MODEL
+        DATASET_NAME = "ctigges/openwebtext-gemma-1024-cl"
+        hook_part = 'post'
+        layer_num = 6
+
+    else:
+        N_CONTEXT = 128 # number of context tokens to consider
+        N_BATCHES = 128 # number of batches to consider
+        TOTAL_BATCHES = 100 
+
+        RELEASE = 'gpt2-small-res-jb'
+        BASE_MODEL = "gpt2-small"
+        FINETUNE_MODEL = 'pierreguillou/gpt2-small-portuguese'
+        BASE_TOKENIZER_NAME = 'openai-community/gpt2'
+        DATASET_NAME = "Skylion007/openwebtext"
+        hook_part = 'pre'
+        layer_num = 6
+
+    SAE_HOOK = f'blocks.{layer_num}.hook_resid_{hook_part}'
+
+    tokenizer_cfg = TokenizerComparisonConfig(BASE_TOKENIZER_NAME, FINETUNE_MODEL)
+
+    tokenizer_comp_df = compare_tokenizers(tokenizer_cfg)
+    print(tokenizer_comp_df)
+
+    activation_cfg = ActivationStoringConfig(BASE_MODEL, FINETUNE_MODEL, DATASET_NAME, 
+                                             N_CONTEXT, N_BATCHES, TOTAL_BATCHES, 
+                                             layer_num, SAE_HOOK)
+
+    result_dict = get_activations_for_base_and_ft(activation_cfg)
+    print(result_dict)
+
+    base_act = torch.load(result_dict['base_act_path'])
+    finetune_act = torch.load(result_dict['finetune_act_path'])
+
+    print('Base vs finetune activations shape: ')
+    print(base_act.shape, finetune_act.shape)

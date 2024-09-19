@@ -28,10 +28,21 @@ def get_env_var():
 
     return pythonpath, datapath
 
-#### torch stuff ####
+#### memory management stuff ####
 def clear_cache():
     gc.collect()
     torch.cuda.empty_cache()
+
+from pynvml import nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo, nvmlInit
+nvmlInit()
+
+def report_memory(message=''):
+    h = nvmlDeviceGetHandleByIndex(0)
+    info = nvmlDeviceGetMemoryInfo(h)
+
+    print(message)
+    print(f'free:\t {info.free / 10e8}')
+    print(f'used:\t {info.used / 10e8}')
 
 def get_device():
     if torch.backends.mps.is_available():
@@ -188,7 +199,7 @@ def plot_log10_hist(y_data, y_value, num_bins=100, first_bin_name = 'First bin v
     fig.update_layout(
         title=f"SAE Features {y_value} histogram ({first_bin_name}: {first_bin_value:.2e})",
         xaxis_title=f"Log10 of {y_value}",
-        yaxis_title="Density",
+        yaxis_title="Count",
         yaxis_range=[0, scale_bin_value * y_scalar],  # Clipping to the second-largest value by default
         bargap=0.2,
         bargroupgap=0.1,
@@ -209,12 +220,38 @@ def plot_log10_hist(y_data, y_value, num_bins=100, first_bin_name = 'First bin v
     # Show the plot
     fig.show()
 
+class FeatureDensityPlotter:
+    def __init__(self, n_features, n_tokens, activation_threshold=1e-10, num_bins=100):
+        self.num_bins = num_bins
+        self.activation_threshold = activation_threshold
+
+        self.n_tokens = n_tokens
+        self.n_features = n_features
+
+        # Initialize a tensor of feature densities for all features,
+        # where feature density is defined as the fraction of tokens on which the feature has a nonzero value.
+        self.feature_densities = torch.zeros(n_features, dtype=torch.float32)
+
+    def update(self, feature_acts):
+        """
+        Expects a tensor feature_acts of shape [N_TOKENS, N_FEATURES].
+
+        Updates the feature_densities buffer:
+        1. For each feature, count the number of tokens that the feature activated on (i.e. had an activation greater than the activation_threshold)
+        2. Add this count at the feature's position in the feature_densities tensor, divided by the total number of tokens (to compute the fraction)
+        """
+
+        activating_tokens_count = (feature_acts > self.activation_threshold).float().sum(0)
+        self.feature_densities += activating_tokens_count / self.n_tokens
+
+    def plot(self, num_bins=100, y_scalar=1.5, y_scale_bin=-2, log_epsilon=1e-10):
+        plot_log10_hist(self.feature_densities, 'Density', num_bins=num_bins, first_bin_name='Dead features density',
+                        y_scalar=y_scalar, y_scale_bin=y_scale_bin, log_epsilon=log_epsilon)
 
 from transformer_lens import HookedTransformer
 from functools import partial
 
-def get_substitution_loss(tokens, model, sae, sae_layer,
-                          reconstruction_metric=None, normalize_activations=True):
+def get_substitution_loss(tokens, model, sae, sae_layer, reconstruction_metric=None):
     '''
     Expects a tensor of input tokens of shape [N_BATCHES, N_CONTEXT].
 
@@ -226,41 +263,18 @@ def get_substitution_loss(tokens, model, sae, sae_layer,
     loss_clean, cache = model.run_with_cache(tokens, names_filter=[sae_layer], return_type="loss")
 
     # Fetch and detach the original activations
-    original_activations = cache[sae_layer].detach()
-
-    # Convert activations to float32 to prevent overflow
-    original_activations_fp32 = original_activations.to(torch.float32)
+    original_activations = cache[sae_layer]
 
     # Get the SAE reconstructed activations (forward pass through SAE)
-    with torch.no_grad():
-        post_reconstructed = sae.forward(original_activations_fp32)
+    post_reconstructed = sae.forward(original_activations)
 
-    # Normalize reconstructed activations to match original activations
-    if normalize_activations:
-        # Compute mean and std of original and reconstructed activations
-        activ_mean = original_activations_fp32.mean()
-        activ_std = original_activations_fp32.std()
-        recon_mean = post_reconstructed.mean()
-        recon_std = post_reconstructed.std()
-
-        post_reconstructed_normalized = (post_reconstructed - recon_mean) / (recon_std + 1e-6) * (activ_std + 1e-6) + activ_mean
-    else:
-        post_reconstructed_normalized = post_reconstructed
-
-    # Convert reconstructed activations back to float16
-    post_reconstructed_fp16 = post_reconstructed_normalized.to(torch.float16)
-
-    # Update the reconstruction quality metric (e.g., R2 score/variance explained)
+    # Update the reconstruction quality metric (e.g. R2 score/variance explained)
     if reconstruction_metric:
-        # Flatten and use float32 for better numerical stability
-        reconstruction_metric.update(
-            post_reconstructed_normalized.flatten(),
-            original_activations_fp32.flatten()
-        )
+        reconstruction_metric.update(post_reconstructed.flatten().float(), original_activations.flatten().float())
 
     # Clear the cache and unused variables early
-    del original_activations, original_activations_fp32, post_reconstructed, post_reconstructed_normalized, cache
-    torch.cuda.empty_cache()
+    del original_activations, cache
+    clear_cache()
 
     # Hook function to substitute activations in-place
     def hook_function(activations, hook, new_activations):
@@ -268,16 +282,14 @@ def get_substitution_loss(tokens, model, sae, sae_layer,
         return activations
 
     # Run model again with hooks to substitute activations and get the substitution loss
-    # Use autocast for higher precision during this pass to prevent overflows
-    with torch.cuda.amp.autocast(enabled=False):
-        loss_reconstructed = model.run_with_hooks(
-            tokens,
-            return_type="loss",
-            fwd_hooks=[(sae_layer, partial(hook_function, new_activations=post_reconstructed_fp16))]
-        )
+    loss_reconstructed = model.run_with_hooks(
+        tokens,
+        return_type="loss",
+        fwd_hooks=[(sae_layer, partial(hook_function, new_activations=post_reconstructed))]
+    )
 
     # Clean up reconstructed activations and free up memory
-    del post_reconstructed_fp16
-    torch.cuda.empty_cache()
+    del post_reconstructed
+    clear_cache()
 
     return loss_clean, loss_reconstructed

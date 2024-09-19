@@ -24,6 +24,11 @@ from utils import *
 from enum import Enum
 import torch
 import plotly.graph_objects as go
+from torcheval.metrics import R2Score
+
+# Must-have for forward-pass only scripts
+torch.set_grad_enabled(False)
+
 
 @dataclass
 class ScoresConfig:
@@ -65,39 +70,13 @@ def get_sae_id_and_layer(cfg: ScoresConfig):
     layer_num, hook_part = cfg.LAYER_NUM, cfg.HOOK_PART
     return f'blocks.{layer_num}.hook_resid_{hook_part}', layer_num
 
-class FeatureDensityPlotter:
-    def __init__(self, n_features, n_tokens, activation_threshold=1e-10, num_bins=100):
-        self.num_bins = num_bins
-        self.activation_threshold = activation_threshold
-
-        self.n_tokens = n_tokens
-        self.n_features = n_features
-
-        # Initialize a tensor of feature densities for all features,
-        # where feature density is defined as the fraction of tokens on which the feature has a nonzero value.
-        self.feature_densities = torch.zeros(n_features, dtype=torch.float32)
-
-    def update(self, feature_acts):
-        """
-        Expects a tensor feature_acts of shape [N_TOKENS, N_FEATURES].
-
-        Updates the feature_densities buffer:
-        1. For each feature, count the number of tokens that the feature activated on (i.e. had an activation greater than the activation_threshold)
-        2. Add this count at the feature's position in the feature_densities tensor, divided by the total number of tokens (to compute the fraction)
-        """
-
-        activating_tokens_count = (feature_acts > self.activation_threshold).float().sum(0)
-        self.feature_densities += activating_tokens_count / self.n_tokens
-
-    def plot(self, num_bins=100, y_scalar=1.5, y_scale_bin=-2, log_epsilon=1e-10):
-        plot_log10_hist(self.feature_densities, 'Density', num_bins=num_bins, first_bin_name='Dead features density',
-                        y_scalar=y_scalar, y_scale_bin=y_scale_bin, log_epsilon=log_epsilon)
-
-#### Loss functions
-
 
 def compute_score(model, sae, experiment: Experiment, batch_size_prompts, total_batches_dict, cfg: ScoresConfig,
                   activation_store=None, tokens_path=''):
+    """Function that performs a single experiment. Depending on the `experiment` parameter passed, it will call one of the functions 
+    defined in experiment_to_function() with sampling function that samples directly from the activation_store (if the function
+    is run for the base model), or with the stored tokens dataset (loaded using the tokens_path).
+    """
     try:
         all_tokens = torch.load(tokens_path)
         base_model_run = False
@@ -134,11 +113,12 @@ def compute_score(model, sae, experiment: Experiment, batch_size_prompts, total_
     if base_model_run:
         torch.save(tokens_dataset, tokens_path)
 
+    clear_cache()
     return scores
 
 def experiment_to_function(experiment: Experiment):
-    """All function that compute score must have the following signature:
-        (model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig) -> *, Optional[tokens_sample]
+    """All function that compute a score must have the following signature:
+        (model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig) -> *, Optional[tokens_sample_tensor]
     """
     if experiment == Experiment.L0_LOSS:
         return get_L0_loss
@@ -148,6 +128,8 @@ def experiment_to_function(experiment: Experiment):
         return get_feature_activations
     elif experiment == Experiment.FEATURE_DENSITY:
         return get_feature_densities
+    else:
+        raise ValueError(f'Unknown experiment passed: {experiment}')
 
 def get_L0_loss(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig):
     sae_id, layer_num = get_sae_id_and_layer(cfg)
@@ -166,7 +148,7 @@ def get_L0_loss(model, sae, total_batches, get_tokens, base_model_run, cfg: Scor
 
         # Run the model and store the activations
         _, cache = model.run_with_cache(tokens, stop_at_layer=layer_num + 1, \
-                                             names_filter=[sae_id])  # [N_BATCH, N_CONTEXT, D_MODEL]
+                                        names_filter=[sae_id])  # [N_BATCH, N_CONTEXT, D_MODEL]
 
         # Get the activations from the cache at the sae_id
         original_activations = cache[sae_id]
@@ -193,25 +175,113 @@ def get_substitution_and_reconstruction_losses(model, sae, total_batches, get_to
     sae_id, layer_num = get_sae_id_and_layer(cfg)
     if base_model_run:
         all_tokens = []
+    
+    all_SL_clean = []
+    all_SL_reconstructed = []
+    sae_reconstruction_metric = R2Score().to(model.cfg.device)
+
+    for k in tqdm(range(total_batches)):
+        # Get a batch of tokens from the dataset
+        tokens = get_tokens(k)  # [N_BATCH, N_CONTEXT]
+
+        if base_model_run:
+            # Store tokens for later reuse
+            all_tokens.append(tokens)
+
+        # Store loss
+        clean_loss, reconstructed_loss = get_substitution_loss(tokens, model, sae, sae_id, sae_reconstruction_metric)
+
+        all_SL_clean.append(clean_loss)
+        all_SL_reconstructed.append(reconstructed_loss)
+
+    clean_loss, reconstructed_loss = torch.tensor(all_SL_clean).mean().item(), torch.tensor(all_SL_reconstructed).mean().item()
+    recontruction_score = sae_reconstruction_metric.compute().item()
 
     tokens_dataset = torch.cat(all_tokens) if base_model_run else None
-    return None, tokens_dataset
+    return clean_loss, reconstructed_loss, recontruction_score, tokens_dataset
 
 def get_feature_activations(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig):
     sae_id, layer_num = get_sae_id_and_layer(cfg)
     if base_model_run:
         all_tokens = []
 
+    all_feature_acts = []
+
+    for k in tqdm(range(total_batches)):
+        # Get a batch of tokens from the dataset
+        tokens = get_tokens(k)  # [N_BATCH, N_CONTEXT]
+        if base_model_run:
+            all_tokens.append(tokens)
+
+        # Run the model and store the activations
+        _, cache = model.run_with_cache(tokens, stop_at_layer=layer_num + 1, \
+                                        names_filter=[sae_id])  # [N_BATCH, N_CONTEXT, D_MODEL]
+
+        # Get the activations from the cache at the sae_id
+        original_activations = cache[sae_id]  # [N_BATCH, N_CONTEXT, D_SAE]
+
+        # Encode the activations with the SAE
+        feature_activations = sae.encode_standard(original_activations) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
+        feature_activations = feature_activations.flatten(0, 1).to('cpu')
+
+        # Store the encoded activations
+        all_feature_acts.append(feature_activations)
+
+        # Explicitly free up memory by deleting the cache and emptying the CUDA cache
+        del cache
+        del original_activations
+        del feature_activations
+        clear_cache()
+
     tokens_dataset = torch.cat(all_tokens) if base_model_run else None
-    return None, tokens_dataset
+    feature_activations = torch.cat(all_feature_acts)
+
+    return feature_activations, tokens_dataset
 
 def get_feature_densities(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig):
+    """
+    Note that this experiment could be combined with Experiment.FEATURE_ACTS, but we run it separately 
+    because of the different total_batches batch size. Experiment.FEATURE_ACTS needs to store all the feature activations
+    to plot the activations histogram, while this one only needs to update the densities plot.
+    """
     sae_id, layer_num = get_sae_id_and_layer(cfg)
     if base_model_run:
         all_tokens = []
 
+    total_tokens = total_batches * cfg.N_BATCH_TOKENS
+    n_features = sae.cfg.d_sae
+
+    density_plotter = FeatureDensityPlotter(n_features, total_tokens)
+
+    for k in tqdm(range(total_batches)):
+        tokens = get_tokens(k)  # [N_BATCH, N_CONTEXT]
+        if base_model_run:
+            all_tokens.append(tokens)
+
+        # Run the model and store the activations
+        _, cache = model.run_with_cache(tokens, stop_at_layer=layer_num + 1, \
+                                        names_filter=[sae_id])  # [N_BATCH, N_CONTEXT, D_MODEL]
+
+        # Get the activations from the cache and convert to float32 for more accurate density computation
+        original_activations = cache[sae_id].float()  # [N_BATCH, N_CONTEXT, D_SAE]
+
+        # Encode the activations with the SAE
+        feature_activations = sae.encode_standard(original_activations) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
+        feature_activations = feature_activations.flatten(0, 1).to('cpu')
+
+        # Update the density histogram data
+        density_plotter.update(feature_activations)
+
+        # Explicitly free up memory by deleting the cache and emptying the CUDA cache
+        del cache
+        del original_activations
+        del feature_activations
+        clear_cache()
+
     tokens_dataset = torch.cat(all_tokens) if base_model_run else None
-    return None, tokens_dataset
+    feature_densities = density_plotter.feature_densities
+
+    return feature_densities, tokens_dataset
 
 ### Main function
 def compute_scores(cfg: ScoresConfig):
@@ -264,19 +334,64 @@ def compute_scores(cfg: ScoresConfig):
     log_path = datapath / 'log'
     logger = setup_logger(log_path, f'sae_scores_{saving_name_base}_vs_{saving_name_ft}')
 
+    ################
     ## BASE model ##
+    ################
+    report_memory('After Model & activation store setup:')
     logger.info('SAE scores on the BASE model:')
 
     ### L0 loss ###
     l0_loss_tokens_path = datapath / f'L0_loss_tokens_{saving_name_base}.pt'
     l0_loss = compute_score(base_model, sae, Experiment.L0_LOSS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
                             activation_store=activation_store, tokens_path=l0_loss_tokens_path)
-    logger.info(f'L0 loss = {l0_loss[0].item()}')
+    logger.info(f'L0 loss = {l0_loss[0].item()}')   
 
-    ## Finetune model ##
+    report_memory('After L0 loss')
+
+    ## Substitution loss & recontruction metric ###
+    sl_loss_tokens_path = datapath / f'Substitution_loss_tokens_{saving_name_base}.pt'
+    scores = compute_score(base_model, sae, Experiment.SUBSTITUTION_LOSS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
+                           activation_store=activation_store, tokens_path=sl_loss_tokens_path)
+    
+    clean_loss, substitution_loss, recontruction_score = scores
+    logger.info(f'Clean loss = {clean_loss}')
+    logger.info(f'Substitution loss = {substitution_loss}')
+    logger.info(f'Varience explained by SAE = {recontruction_score}')
+
+    report_memory('After SL loss')
+
+    ## Features activations ##
+    feature_acts_tokens_path = datapath / f'Feature_acts_tokens_{saving_name_base}.pt'
+    scores = compute_score(base_model, sae, Experiment.FEATURE_ACTS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
+                           activation_store=activation_store, tokens_path=feature_acts_tokens_path)
+    feature_acts = scores[0]
+
+    feature_acts_path = datapath / f'Feature_acts_{saving_name_base}_on_{saving_name_ds}.pt'
+    torch.save(feature_acts, feature_acts_path)
+
+    del feature_acts
+    clear_cache()
+    report_memory('After Feature acts')
+
+    ## Features density ##
+    feature_densities_tokens_path = datapath / f'Feature_densities_tokens_{saving_name_base}.pt'
+    scores = compute_score(base_model, sae, Experiment.FEATURE_DENSITY, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
+                           activation_store=activation_store, tokens_path=feature_densities_tokens_path)
+    feature_densities = scores[0]
+
+    feature_densities_path = datapath / f'Feature_densities_{saving_name_base}_on_{saving_name_ds}.pt'
+    torch.save(feature_densities, feature_densities_path)
+
+    del feature_densities
+    clear_cache()
+    report_memory('After Feature densities')
+
+    ## Switching to the finetune model
+
     # Offload the base model
     del base_model, activation_store
     clear_cache()
+    report_memory('After Base model offload')
 
     # Load the finetune model
     finetune_model_hf = AutoModelForCausalLM.from_pretrained(cfg.FINETUNE_MODEL)
@@ -284,14 +399,86 @@ def compute_scores(cfg: ScoresConfig):
                                                           hf_model=finetune_model_hf, dtype=cfg.DTYPE)
     del finetune_model_hf
     clear_cache()
+    report_memory('After loading the finetune model')
 
+    ###################
+    # FINETUNE model ##
+    ###################
     logger.info('SAE scores on the FINETUNE model:')
-    ### L0 loss ###
+
+    ## L0 loss ###
     l0_loss = compute_score(finetune_model, sae, Experiment.L0_LOSS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
                             tokens_path=l0_loss_tokens_path)
     logger.info(f'L0 loss = {l0_loss[0].item()}')
 
+    ### Substitution loss & recontruction metric ###
+    scores = compute_score(finetune_model, sae, Experiment.SUBSTITUTION_LOSS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
+                           tokens_path=sl_loss_tokens_path)
+    
+    clean_loss, substitution_loss, recontruction_score = scores
+    logger.info(f'Clean loss = {clean_loss}')
+    logger.info(f'Substitution loss = {substitution_loss}')
+    logger.info(f'Varience explained by SAE = {recontruction_score}')
 
-    # Ensure the log is flushed
+    ## Features activations ##
+    scores = compute_score(finetune_model, sae, Experiment.FEATURE_ACTS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
+                           tokens_path=feature_acts_tokens_path)
+    feature_acts = scores[0]
+
+    feature_acts_path = datapath / f'Feature_acts_{saving_name_ft}_on_{saving_name_ds}.pt'
+    torch.save(feature_acts, feature_acts_path)
+
+    del feature_acts
+    clear_cache()
+
+    ## Features density ##
+    scores = compute_score(finetune_model, sae, Experiment.FEATURE_DENSITY, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
+                           tokens_path=feature_densities_tokens_path)
+    feature_densities = scores[0]
+
+    feature_densities_path = datapath / f'Feature_densities_{saving_name_ft}_on_{saving_name_ds}.pt'
+    torch.save(feature_densities, feature_densities_path)
+
+    del feature_densities
+    clear_cache()
+
+    # Ensure the log is flushed in the end
     for handler in logger.handlers:
         handler.flush()
+
+if __name__ == "__main__":
+    ### set this args with argparse, now hardcoded
+    GEMMA=False
+
+    if GEMMA == True:
+        N_CONTEXT = 1024 # number of context tokens to consider
+        N_BATCHES = 8 # number of batches to consider
+        TOTAL_BATCHES = 20 
+
+        RELEASE = 'gemma-2b-res-jb'
+        BASE_MODEL = "google/gemma-2b"
+        FINETUNE_MODEL = 'shahdishank/gemma-2b-it-finetune-python-codes'
+        DATASET_NAME = "ctigges/openwebtext-gemma-1024-cl"
+        hook_part = 'post'
+        layer_num = 6
+    else:
+        N_CONTEXT = 128 # number of context tokens to consider
+        N_BATCHES = 8 # number of batches to consider
+        TOTAL_BATCHES = 100 
+
+        RELEASE = 'gpt2-small-res-jb'
+        BASE_MODEL = "gpt2-small"
+        FINETUNE_MODEL = 'pierreguillou/gpt2-small-portuguese'
+        DATASET_NAME = "Skylion007/openwebtext"
+        hook_part = 'pre'
+        layer_num = 6
+
+    SAE_HOOK = f'blocks.{layer_num}.hook_resid_{hook_part}'
+
+    cfg = ScoresConfig(BASE_MODEL, FINETUNE_MODEL, DATASET_NAME, RELEASE, layer_num, hook_part,
+                       SUBSTITUTION_LOSS_BATCH_SIZE = 25,
+                       L0_LOSS_BATCH_SIZE = 50,
+                       FEATURE_ACTS_BATCH_SIZE = 25,
+                       FEATURE_DENSITY_BATCH_SIZE = 50)
+
+    compute_scores(cfg)
