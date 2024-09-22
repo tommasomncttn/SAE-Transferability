@@ -8,4 +8,7 @@ ipython
 sae-lens
 transformer-lens
 python-dotenv
-
+transformers
+datasets
+pynvml
+torcheval

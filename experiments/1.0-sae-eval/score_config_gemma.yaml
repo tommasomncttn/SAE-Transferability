@@ -1,0 +1,26 @@
+# LLMs
+BASE_MODEL: "google/gemma-2b"
+FINETUNE_MODEL: 'shahdishank/gemma-2b-it-finetune-python-codes'
+
+# dataset
+DATASET_NAME: "ctigges/openwebtext-gemma-1024-cl"
+
+# SAE configs
+SAE_RELEASE: 'gemma-2b-res-jb'
+LAYER_NUM: 6 # specify the layer number
+HOOK_PART: "post"
+
+# misc
+IS_DATASET_TOKENIZED: false # set to true if the dataset is tokenized
+
+# sizes for experiments
+SUBSTITUTION_LOSS_BATCH_SIZE: 25
+L0_LOSS_BATCH_SIZE: 50
+FEATURE_ACTS_BATCH_SIZE: 25
+FEATURE_DENSITY_BATCH_SIZE: 50
+
+# parameters for the activation store
+STORE_BATCH_SIZE_PROMPTS: 8
+TRAIN_BATCH_SIZE_TOKENS: 4096
+N_BATCHES_IN_BUFFER: 32
+N_BATCH_TOKENS: null # will be computed later

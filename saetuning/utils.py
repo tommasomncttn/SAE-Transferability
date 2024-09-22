@@ -1,8 +1,6 @@
 import torch
 import torch.nn.functional as F
 from enum import Enum
-import numpy as np
-from scipy.stats import gamma
 import os
 from dotenv import load_dotenv
 import gc
