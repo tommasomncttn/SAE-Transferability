@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import gc
 from pathlib import Path
 import logging
+import json
 
 # Load environment variables from the .env file
 load_dotenv()
@@ -153,7 +154,7 @@ def L0_loss(x, threshold=1e-8):
     Expects a tensor x of shape [N_TOKENS, N_SAE].
     
     Returns a scalar representing the mean value of activated features (i.e. values across the N_SAE dimensions bigger than
-    the threshhold), a.k.a. L0 loss.
+    the threshold), a.k.a. L0 loss.
     """
     return (x > threshold).float().sum(-1).mean()
 
@@ -251,45 +252,138 @@ class FeatureDensityPlotter:
 from transformer_lens import HookedTransformer
 from functools import partial
 
-def get_substitution_loss(tokens, model, sae, sae_layer, reconstruction_metric=None):
+def get_substitution_loss(tokens, model, sae, sae_hook, model_name, reconstruction_metric=None):
     '''
     Expects a tensor of input tokens of shape [N_BATCHES, N_CONTEXT].
 
     Returns two losses:
-    1. Clean loss - loss of the normal forward pass of the model at the input tokens
-    2. Substitution loss - loss when substituting SAE reconstructions of the residual stream at the SAE layer of the model
+    1. Clean loss - loss of the normal forward pass of the model at the input tokens.
+    2. Substitution loss - loss when substituting SAE reconstructions of the residual stream at the SAE layer of the model.
     '''
     # Run the model with cache to get the original activations and clean loss
-    loss_clean, cache = model.run_with_cache(tokens, names_filter=[sae_layer], return_type="loss")
+    loss_clean, cache = model.run_with_cache(tokens, names_filter=[sae_hook], return_type="loss")
 
     # Fetch and detach the original activations
-    original_activations = cache[sae_layer]
+    original_activations = cache[sae_hook]
 
-    # Get the SAE reconstructed activations (forward pass through SAE)
-    post_reconstructed = sae.forward(original_activations)
+    # Apply activation filtering
+    activations_filtered, filter_mask = filter_activations(original_activations, model_name=model_name, return_mask=True)
+    # Shape of activations_filtered is now [valid_activations, d_model]
 
-    # Update the reconstruction quality metric (e.g. R2 score/variance explained)
+    # Filter the tokens using the same mask
+    tokens_filtered = tokens[filter_mask].reshape(activations_filtered.shape[0]) # shape [valid_activations]
+
+    # Get the SAE reconstructed activations
+    post_reconstructed = sae.forward(activations_filtered) # shape [valid_activations, d_model]
+
+    # Update the reconstruction quality metric, if provided
     if reconstruction_metric:
-        reconstruction_metric.update(post_reconstructed.flatten().float(), original_activations.flatten().float())
+        reconstruction_metric.update(post_reconstructed.flatten().float(), activations_filtered.flatten().float())
 
-    # Clear the cache and unused variables early
-    del original_activations, cache
+    # Free unused variables early to save memory
+    del original_activations, activations_filtered, cache
     clear_cache()
 
-    # Hook function to substitute activations in-place
+    # Hook function to substitute activations with SAE reconstructions
     def hook_function(activations, hook, new_activations):
-        activations.copy_(new_activations)  # In-place copy to save memory
+        activations.copy_(new_activations)  # Perform in-place substitution of activations
         return activations
 
-    # Run model again with hooks to substitute activations and get the substitution loss
+    # Run the model again with hooks to substitute activations at the SAE layer
     loss_reconstructed = model.run_with_hooks(
-        tokens,
+        tokens_filtered,
         return_type="loss",
-        fwd_hooks=[(sae_layer, partial(hook_function, new_activations=post_reconstructed))]
+        fwd_hooks=[(sae_hook, partial(hook_function, new_activations=post_reconstructed))]
     )
 
-    # Clean up reconstructed activations and free up memory
+    # Clean up the reconstructed activations and clear memory
     del post_reconstructed
     clear_cache()
 
     return loss_clean, loss_reconstructed
+
+### Outliers filtering ###
+
+# First, we'll load a config that is filled with the values obtained after running notebooks/find_outlier_norms.ipynb 
+def load_outliers_cfg():
+    pythonpath, _ = get_env_var()
+    OUTLIERS_CFG_PATH = pythonpath / 'saetuning' / 'cfg' / 'outlier_cfg.json'
+    
+    with open(OUTLIERS_CFG_PATH, 'r') as file:
+        OUTLIERS_CFG = json.load(file)
+
+    return OUTLIERS_CFG
+
+OUTLIERS_CFG = load_outliers_cfg()
+
+def get_norm_scalar(model_name):
+    return OUTLIERS_CFG.get("norm_scalar", {}).get(model_name, None)
+
+def get_threshold_multiplier(model_name):
+    return OUTLIERS_CFG.get("threshhold_multiplier", {}).get(model_name, None)
+
+def get_base_threshhold(model_name):
+    return OUTLIERS_CFG.get("base_threshhold", {}).get(model_name, None)
+
+# Main filtering method
+def filter_activations(acts, model_name, return_mask=False):
+    """
+    Filters out activations based on outlier norms and returns the filtered activations.
+    
+    Args:
+        acts (torch.Tensor): A tensor of activations with shape [BATCH, SEQ, D_MODEL].
+        model_name (str): The name of the model used to determine the threshold for filtering out outlier activations.
+        return_mask (bool): If True, returns the 2D boolean mask indicating which activations were retained. The mask has shape [BATCH, SEQ].
+    
+    Returns:
+        torch.Tensor: A tensor of filtered activations with shape [N_VALID_ACTIVATIONS, D_MODEL], where N_VALID_ACTIVATIONS <= BATCH * SEQ.
+        torch.Tensor (optional): A 2D boolean tensor of shape [BATCH, SEQ] representing the filtering mask, indicating whether each activation was retained (True) or filtered out (False).
+    
+    Notes:
+        - The function removes activations identified as outliers by `is_act_outlier`. The activations that pass the filter are flattened into a tensor of shape [N_VALID_ACTIVATIONS, D_MODEL].
+        - If `return_mask=True`, the function also returns a 2D boolean mask corresponding to the [BATCH, SEQ] dimensions of the original activations. This mask can be useful for tracking which activations were kept.
+        - The returned filtered activations are flattened across both batch and sequence dimensions. If reshaping back to a sequence or batch structure is required, you will need to do this outside the function based on the original mask.
+    """
+    # Get the outlier mask
+    is_outlier_mask = is_act_outlier(acts, model_name)  # [BATCH, SEQ]
+
+    # Expand the mask to match the last dimension (D_MODEL) for correct filtering
+    expanded_mask = is_outlier_mask.unsqueeze(-1).expand_as(acts)  # [BATCH, SEQ, D_MODEL]
+
+    # Apply the mask and filter out the outlier activations
+    filtered_acts = acts[~expanded_mask].reshape(-1, acts.shape[-1])  # Flatten only the valid activations, retaining D_MODEL
+
+    if return_mask:
+        # Return the 2D mask corresponding to the original [BATCH, SEQ] shape
+        filter_mask = ~is_outlier_mask  # Keep it as 2D: [BATCH, SEQ]
+        return filtered_acts, filter_mask
+    else:
+        return filtered_acts
+    
+# Auxilary method for getting a mask of outlier activations
+def is_act_outlier(act_tensor, model_name):
+    """
+    Expects act_tensor of shape [*, D_MODEL]
+
+    Returns a boolean tensor of shape [*], where for each batch position we report whether the corresponding activation
+    exceeds the outlier threshold that is defined as
+    
+    threshold = threshold_multiplier * base_threshold, where
+    base_threshold = sqrt(D_MODEL)
+
+    Important! This threshold value is in the normalized scale, i.e. is meant to be used for activations that are scaled
+    in such a way, that their average norm is equal to sqrt(D_MODEL). To do this normalization, we multiple by norm_scalar
+    of the corresponding model.
+
+    Check this blog-post for more details: https://www.lesswrong.com/posts/fmwk6qxrpW8d4jvbd/saes-usually-transfer-between-base-and-chat-models
+    """
+    norm_scalar = get_norm_scalar(model_name)
+    threshold_multiplier = get_threshold_multiplier(model_name)
+    base_threshold = get_base_threshhold(model_name)
+
+    threshold = threshold_multiplier * base_threshold
+
+    scaled_act = norm_scalar * act_tensor
+    scaled_act_norms = torch.norm(scaled_act, dim=-1)
+
+    return scaled_act_norms > threshold

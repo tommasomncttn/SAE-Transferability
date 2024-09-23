@@ -151,18 +151,18 @@ def get_L0_loss(model, sae, total_batches, get_tokens, base_model_run, cfg: Scor
                                         names_filter=[sae_id])  # [N_BATCH, N_CONTEXT, D_MODEL]
 
         # Get the activations from the cache at the sae_id
-        original_activations = cache[sae_id]
+        activations_original = cache[sae_id]
+        activations_filtered = filter_activations(activations_original, model_name=cfg.BASE_MODEL)
 
         # Encode the activations with the SAE
-        feature_activations = sae.encode_standard(original_activations) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
-        feature_activations.to('cpu')
+        feature_activations = sae.encode_standard(activations_filtered) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
 
         # Store the encoded activations
         all_L0.append(L0_loss(feature_activations))
 
         # Explicitly free up memory by deleting the cache and emptying the CUDA cache
         del cache
-        del original_activations
+        del activations_original, activations_filtered
         del feature_activations
         torch.cuda.empty_cache()
 
@@ -189,7 +189,8 @@ def get_substitution_and_reconstruction_losses(model, sae, total_batches, get_to
             all_tokens.append(tokens)
 
         # Store loss
-        clean_loss, reconstructed_loss = get_substitution_loss(tokens, model, sae, sae_id, sae_reconstruction_metric)
+        clean_loss, reconstructed_loss = get_substitution_loss(tokens, model, sae, sae_id,
+                                                               cfg.BASE_MODEL, sae_reconstruction_metric)
 
         all_SL_clean.append(clean_loss)
         all_SL_reconstructed.append(reconstructed_loss)
@@ -218,18 +219,19 @@ def get_feature_activations(model, sae, total_batches, get_tokens, base_model_ru
                                         names_filter=[sae_id])  # [N_BATCH, N_CONTEXT, D_MODEL]
 
         # Get the activations from the cache at the sae_id
-        original_activations = cache[sae_id]  # [N_BATCH, N_CONTEXT, D_SAE]
+        activations_original = cache[sae_id] # [N_BATCH, N_CONTEXT, D_SAE]
+        activations_filtered = filter_activations(activations_original, model_name=cfg.BASE_MODEL)
 
         # Encode the activations with the SAE
-        feature_activations = sae.encode_standard(original_activations) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
-        feature_activations = feature_activations.flatten(0, 1).to('cpu')
+        feature_activations = sae.encode_standard(activations_filtered) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
+        feature_activations = feature_activations.to('cpu')
 
         # Store the encoded activations
         all_feature_acts.append(feature_activations)
 
         # Explicitly free up memory by deleting the cache and emptying the CUDA cache
         del cache
-        del original_activations
+        del activations_original, activations_filtered
         del feature_activations
         clear_cache()
 
@@ -263,18 +265,19 @@ def get_feature_densities(model, sae, total_batches, get_tokens, base_model_run,
                                         names_filter=[sae_id])  # [N_BATCH, N_CONTEXT, D_MODEL]
 
         # Get the activations from the cache and convert to float32 for more accurate density computation
-        original_activations = cache[sae_id].float()  # [N_BATCH, N_CONTEXT, D_SAE]
+        activations_original = cache[sae_id].float() # [N_BATCH, N_CONTEXT, D_SAE]
+        activations_filtered = filter_activations(activations_original, model_name=cfg.BASE_MODEL)
 
         # Encode the activations with the SAE
-        feature_activations = sae.encode_standard(original_activations) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
-        feature_activations = feature_activations.flatten(0, 1).to('cpu')
+        feature_activations = sae.encode_standard(activations_filtered) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
+        feature_activations = feature_activations.to('cpu')
 
         # Update the density histogram data
         density_plotter.update(feature_activations)
 
         # Explicitly free up memory by deleting the cache and emptying the CUDA cache
         del cache
-        del original_activations
+        del activations_original, activations_filtered
         del feature_activations
         clear_cache()
 

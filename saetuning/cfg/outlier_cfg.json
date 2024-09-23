@@ -1,0 +1,14 @@
+{
+    "norm_scalar": {
+        "google/gemma-2b": 0.31278620989943556,
+        "gpt2-small": 0.27139524668485193
+    },
+    "threshhold_multiplier": {
+        "google/gemma-2b": 2,
+        "gpt2-small": 2
+    },
+    "base_threshhold": {
+        "google/gemma-2b": 45.254833995939045,
+        "gpt2-small": 27.712812921102035
+    }
+}
