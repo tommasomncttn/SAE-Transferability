@@ -72,7 +72,7 @@ def get_sae_id_and_layer(cfg: ScoresConfig):
 
 
 def compute_score(model, sae, experiment: Experiment, batch_size_prompts, total_batches_dict, cfg: ScoresConfig,
-                  activation_store=None, tokens_path=''):
+                  activation_store=None, tokens_path='', filter=False):
     """Function that performs a single experiment. Depending on the `experiment` parameter passed, it will call one of the functions 
     defined in experiment_to_function() with sampling function that samples directly from the activation_store (if the function
     is run for the base model), or with the stored tokens dataset (loaded using the tokens_path).
@@ -108,7 +108,8 @@ def compute_score(model, sae, experiment: Experiment, batch_size_prompts, total_
         all_tokens = []
 
     score_function = experiment_to_function(experiment)
-    *scores, tokens_dataset = score_function(model, sae, total_batches, get_tokens, base_model_run, cfg)
+    *scores, tokens_dataset = score_function(model, sae, total_batches, get_tokens, base_model_run, cfg, 
+                                             filter=filter)
 
     if base_model_run:
         torch.save(tokens_dataset, tokens_path)
@@ -131,7 +132,7 @@ def experiment_to_function(experiment: Experiment):
     else:
         raise ValueError(f'Unknown experiment passed: {experiment}')
 
-def get_L0_loss(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig):
+def get_L0_loss(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig, filter):
     sae_id, layer_num = get_sae_id_and_layer(cfg)
     if base_model_run:
         all_tokens = []
@@ -152,7 +153,10 @@ def get_L0_loss(model, sae, total_batches, get_tokens, base_model_run, cfg: Scor
 
         # Get the activations from the cache at the sae_id
         activations_original = cache[sae_id]
-        activations_filtered = filter_activations(activations_original, model_name=cfg.BASE_MODEL)
+        if filter:
+            activations_filtered = filter_activations(activations_original, model_name=cfg.BASE_MODEL)
+        else:
+            activations_filtered = activations_original
 
         # Encode the activations with the SAE
         feature_activations = sae.encode_standard(activations_filtered) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
@@ -171,7 +175,7 @@ def get_L0_loss(model, sae, total_batches, get_tokens, base_model_run, cfg: Scor
 
     return l0_loss, tokens_dataset
 
-def get_substitution_and_reconstruction_losses(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig):
+def get_substitution_and_reconstruction_losses(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig, filter=True):
     sae_id, layer_num = get_sae_id_and_layer(cfg)
     if base_model_run:
         all_tokens = []
@@ -201,7 +205,7 @@ def get_substitution_and_reconstruction_losses(model, sae, total_batches, get_to
     tokens_dataset = torch.cat(all_tokens) if base_model_run else None
     return clean_loss, reconstructed_loss, recontruction_score, tokens_dataset
 
-def get_feature_activations(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig):
+def get_feature_activations(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig, filter):
     sae_id, layer_num = get_sae_id_and_layer(cfg)
     if base_model_run:
         all_tokens = []
@@ -220,7 +224,10 @@ def get_feature_activations(model, sae, total_batches, get_tokens, base_model_ru
 
         # Get the activations from the cache at the sae_id
         activations_original = cache[sae_id] # [N_BATCH, N_CONTEXT, D_SAE]
-        activations_filtered = filter_activations(activations_original, model_name=cfg.BASE_MODEL)
+        if filter:
+            activations_filtered = filter_activations(activations_original, model_name=cfg.BASE_MODEL)
+        else:
+            activations_filtered = activations_original
 
         # Encode the activations with the SAE
         feature_activations = sae.encode_standard(activations_filtered) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
@@ -240,7 +247,7 @@ def get_feature_activations(model, sae, total_batches, get_tokens, base_model_ru
 
     return feature_activations, tokens_dataset
 
-def get_feature_densities(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig):
+def get_feature_densities(model, sae, total_batches, get_tokens, base_model_run, cfg: ScoresConfig, filter):
     """
     Note that this experiment could be combined with Experiment.FEATURE_ACTS, but we run it separately 
     because of the different total_batches batch size. Experiment.FEATURE_ACTS needs to store all the feature activations
@@ -266,7 +273,10 @@ def get_feature_densities(model, sae, total_batches, get_tokens, base_model_run,
 
         # Get the activations from the cache and convert to float32 for more accurate density computation
         activations_original = cache[sae_id].float() # [N_BATCH, N_CONTEXT, D_SAE]
-        activations_filtered = filter_activations(activations_original, model_name=cfg.BASE_MODEL)
+        if filter:
+            activations_filtered = filter_activations(activations_original, model_name=cfg.BASE_MODEL)
+        else:
+            activations_filtered = activations_original.flatten(0, 1)
 
         # Encode the activations with the SAE
         feature_activations = sae.encode_standard(activations_filtered) # the result of the encode method of the sae on the "sae_id" activations (a specific activation tensor of the LLM)
@@ -346,7 +356,7 @@ def compute_scores(cfg: ScoresConfig):
     ### L0 loss ###
     l0_loss_tokens_path = datapath / f'L0_loss_tokens_{saving_name_base}.pt'
     l0_loss = compute_score(base_model, sae, Experiment.L0_LOSS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
-                            activation_store=activation_store, tokens_path=l0_loss_tokens_path)
+                            activation_store=activation_store, tokens_path=l0_loss_tokens_path, filter=False)
     logger.info(f'L0 loss = {l0_loss[0].item()}')   
 
     report_memory('After L0 loss')
@@ -354,7 +364,7 @@ def compute_scores(cfg: ScoresConfig):
     ## Substitution loss & recontruction metric ###
     sl_loss_tokens_path = datapath / f'Substitution_loss_tokens_{saving_name_base}.pt'
     scores = compute_score(base_model, sae, Experiment.SUBSTITUTION_LOSS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
-                           activation_store=activation_store, tokens_path=sl_loss_tokens_path)
+                           activation_store=activation_store, tokens_path=sl_loss_tokens_path, filter=True)
     
     clean_loss, substitution_loss, recontruction_score = scores
     logger.info(f'Clean loss = {clean_loss}')
@@ -366,7 +376,7 @@ def compute_scores(cfg: ScoresConfig):
     ## Features activations ##
     feature_acts_tokens_path = datapath / f'Feature_acts_tokens_{saving_name_base}.pt'
     scores = compute_score(base_model, sae, Experiment.FEATURE_ACTS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
-                           activation_store=activation_store, tokens_path=feature_acts_tokens_path)
+                           activation_store=activation_store, tokens_path=feature_acts_tokens_path, filter=False)
     feature_acts = scores[0]
 
     feature_acts_path = datapath / f'Feature_acts_{saving_name_base}_on_{saving_name_ds}.pt'
@@ -379,7 +389,7 @@ def compute_scores(cfg: ScoresConfig):
     ## Features density ##
     feature_densities_tokens_path = datapath / f'Feature_densities_tokens_{saving_name_base}.pt'
     scores = compute_score(base_model, sae, Experiment.FEATURE_DENSITY, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
-                           activation_store=activation_store, tokens_path=feature_densities_tokens_path)
+                           activation_store=activation_store, tokens_path=feature_densities_tokens_path, filter=False)
     feature_densities = scores[0]
 
     feature_densities_path = datapath / f'Feature_densities_{saving_name_base}_on_{saving_name_ds}.pt'
@@ -411,12 +421,12 @@ def compute_scores(cfg: ScoresConfig):
 
     ## L0 loss ###
     l0_loss = compute_score(finetune_model, sae, Experiment.L0_LOSS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
-                            tokens_path=l0_loss_tokens_path)
+                            tokens_path=l0_loss_tokens_path, filter=False)
     logger.info(f'L0 loss = {l0_loss[0].item()}')
 
     ### Substitution loss & recontruction metric ###
     scores = compute_score(finetune_model, sae, Experiment.SUBSTITUTION_LOSS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
-                           tokens_path=sl_loss_tokens_path)
+                           tokens_path=sl_loss_tokens_path, filter=True)
     
     clean_loss, substitution_loss, recontruction_score = scores
     logger.info(f'Clean loss = {clean_loss}')
@@ -425,7 +435,7 @@ def compute_scores(cfg: ScoresConfig):
 
     ## Features activations ##
     scores = compute_score(finetune_model, sae, Experiment.FEATURE_ACTS, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
-                           tokens_path=feature_acts_tokens_path)
+                           tokens_path=feature_acts_tokens_path, filter=False)
     feature_acts = scores[0]
 
     feature_acts_path = datapath / f'Feature_acts_{saving_name_ft}_on_{saving_name_ds}.pt'
@@ -436,7 +446,7 @@ def compute_scores(cfg: ScoresConfig):
 
     ## Features density ##
     scores = compute_score(finetune_model, sae, Experiment.FEATURE_DENSITY, batch_size_prompts, TOTAL_BATCHES_DICT, cfg,
-                           tokens_path=feature_densities_tokens_path)
+                           tokens_path=feature_densities_tokens_path, filter=False)
     feature_densities = scores[0]
 
     feature_densities_path = datapath / f'Feature_densities_{saving_name_ft}_on_{saving_name_ds}.pt'
