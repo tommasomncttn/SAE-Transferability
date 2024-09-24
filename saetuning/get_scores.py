@@ -60,6 +60,11 @@ class ScoresConfig:
     N_BATCHES_IN_BUFFER: int = 32
     N_BATCH_TOKENS: int = None # will be computed later
 
+    # optional argument to load stuff offline
+    HF_MODEL_BASE = None
+    HF_MODEL_FINETUNE = None
+    DATASET_PATH = None
+
 class Experiment(Enum):
     SUBSTITUTION_LOSS = 'SubstitutionLoss'
     L0_LOSS = 'L0_loss'
@@ -300,7 +305,9 @@ def compute_scores(cfg: ScoresConfig):
 
     # load the base model
     device = get_device()
-    base_model = HookedSAETransformer.from_pretrained(cfg.BASE_MODEL, device=device, dtype=cfg.DTYPE)
+    if cfg.HF_MODEL is not None:
+        hf_model_base = AutoModelForCausalLM.from_pretrained(cfg.HF_MODEL_BASE)
+    base_model = HookedSAETransformer.from_pretrained(cfg.BASE_MODEL, device=device, dtype=cfg.DTYPE, hf_model = hf_model_base)
 
     # define the sae_id and the import the SAE
     sae_id, _ = get_sae_id_and_layer(cfg)
@@ -322,6 +329,7 @@ def compute_scores(cfg: ScoresConfig):
         train_batch_size_tokens=cfg.TRAIN_BATCH_SIZE_TOKENS,
         n_batches_in_buffer=cfg.N_BATCHES_IN_BUFFER,
         device=device,
+        dataset=hf_dataset
     )
 
     # compute the sizes for the experiments
@@ -394,7 +402,8 @@ def compute_scores(cfg: ScoresConfig):
     report_memory('After Base model offload')
 
     # Load the finetune model
-    finetune_model_hf = AutoModelForCausalLM.from_pretrained(cfg.FINETUNE_MODEL)
+    FINETUNE_MODEL = cfg.FINETUNE_MODEL if cfg.HF_MODEL_FINETUNE is None else cfg.HF_MODEL_FINETUNE
+    finetune_model_hf = AutoModelForCausalLM.from_pretrained(FINETUNE_MODEL)
     finetune_model = HookedSAETransformer.from_pretrained(cfg.BASE_MODEL, device=device, 
                                                           hf_model=finetune_model_hf, dtype=cfg.DTYPE)
     del finetune_model_hf

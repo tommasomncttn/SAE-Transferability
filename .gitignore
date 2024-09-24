@@ -2,3 +2,5 @@
 .env
 data/
 plots/
+models/
+cache_dir/

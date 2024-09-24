@@ -24,3 +24,8 @@ STORE_BATCH_SIZE_PROMPTS: 8
 TRAIN_BATCH_SIZE_TOKENS: 4096
 N_BATCHES_IN_BUFFER: 32
 N_BATCH_TOKENS: null # will be computed later
+
+# HF_MODEL PATH
+HF_MODEL_BASE: "/leonardo_work/IscrC_MGNTC/tmencatt/SAE-Tuning-Merging/models/google/gemma-2b"
+HF_MODEL_FINETUNE: "/leonardo_work/IscrC_MGNTC/tmencatt/SAE-Tuning-Merging/models/shahdishank/gemma-2b-it-finetune-python-codes"
+DATASET_PATH: "/leonardo_work/IscrC_MGNTC/tmencatt/SAE-Tuning-Merging/data/datasets_gemma"
