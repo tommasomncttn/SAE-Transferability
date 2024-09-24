@@ -199,9 +199,15 @@ def get_substitution_and_reconstruction_losses(model, sae, total_batches, get_to
         all_SL_clean.append(clean_loss)
         all_SL_reconstructed.append(reconstructed_loss)
 
-    clean_loss, reconstructed_loss = torch.tensor(all_SL_clean).mean().item(), torch.tensor(all_SL_reconstructed).mean().item()
-    recontruction_score = sae_reconstruction_metric.compute().item()
+    clean_loss_tensor = torch.tensor(all_SL_clean)
+    clean_loss = clean_loss_tensor.mean().item()
 
+    loss_reconstructed_tensor = torch.tensor(all_SL_reconstructed)
+    filtered_loss_reconstructed = loss_reconstructed_tensor[~torch.isinf(loss_reconstructed_tensor)]
+
+    reconstructed_loss = filtered_loss_reconstructed.mean().item()
+    recontruction_score = sae_reconstruction_metric.compute().item()
+    
     tokens_dataset = torch.cat(all_tokens) if base_model_run else None
     return clean_loss, reconstructed_loss, recontruction_score, tokens_dataset
 
