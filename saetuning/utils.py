@@ -325,6 +325,9 @@ def get_threshold_multiplier(model_name):
 def get_base_threshhold(model_name):
     return OUTLIERS_CFG.get("base_threshhold", {}).get(model_name, None)
 
+def get_absolute_threshhold(model_name):
+    return OUTLIERS_CFG.get("absolute_threshold", {}).get(model_name, None)
+
 # Main filtering method
 def filter_activations(acts, model_name, return_mask=False):
     """
@@ -380,8 +383,12 @@ def is_act_outlier(act_tensor, model_name):
     norm_scalar = get_norm_scalar(model_name)
     threshold_multiplier = get_threshold_multiplier(model_name)
     base_threshold = get_base_threshhold(model_name)
+    absolute_threshhold = get_absolute_threshhold(model_name)
 
-    threshold = threshold_multiplier * base_threshold
+    if absolute_threshhold:
+        threshold = norm_scalar * absolute_threshhold
+    else:
+        threshold = threshold_multiplier * base_threshold
 
     scaled_act = norm_scalar * act_tensor
     scaled_act_norms = torch.norm(scaled_act, dim=-1)

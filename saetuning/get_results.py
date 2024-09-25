@@ -353,7 +353,7 @@ if __name__ == "__main__":
 
     if GEMMA == True:
         N_CONTEXT = 1024 # number of context tokens to consider
-        N_BATCHES = 128 # number of batches to consider
+        N_BATCHES = 8 # number of batches to consider
         TOTAL_BATCHES = 20 
 
         RELEASE = 'gemma-2b-res-jb'
@@ -366,7 +366,7 @@ if __name__ == "__main__":
 
     else:
         N_CONTEXT = 128 # number of context tokens to consider
-        N_BATCHES = 128 # number of batches to consider
+        N_BATCHES = 8 # number of batches to consider
         TOTAL_BATCHES = 100 
 
         RELEASE = 'gpt2-small-res-jb'

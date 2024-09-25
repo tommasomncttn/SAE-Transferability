@@ -10,5 +10,9 @@
     "base_threshhold": {
         "google/gemma-2b": 45.254833995939045,
         "gpt2-small": 27.712812921102035
+    },
+    "absolute_threshold": {
+        "mistral-7b": 200
     }
+    
 }
