@@ -1,7 +1,8 @@
 {
     "norm_scalar": {
         "google/gemma-2b": 0.31278620989943556,
-        "gpt2-small": 0.27139524668485193
+        "gpt2-small": 0.27139524668485193,
+        "mistral-7b": 14.178454680291779
     },
     "threshhold_multiplier": {
         "google/gemma-2b": 2,
@@ -14,5 +15,4 @@
     "absolute_threshold": {
         "mistral-7b": 200
     }
-    
 }
