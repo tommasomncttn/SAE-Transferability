@@ -373,6 +373,11 @@ def is_act_outlier(act_tensor, model_name):
     
     threshold = threshold_multiplier * base_threshold, where
     base_threshold = sqrt(D_MODEL)
+    --
+    OR
+    --
+    threshold = norm_scalar * absolute_threshhold,
+    if the absolute_threshhold is provided for the model
 
     Important! This threshold value is in the normalized scale, i.e. is meant to be used for activations that are scaled
     in such a way, that their average norm is equal to sqrt(D_MODEL). To do this normalization, we multiple by norm_scalar
