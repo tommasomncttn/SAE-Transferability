@@ -55,8 +55,17 @@ Currently, the config cells are prefilled to work with 3 models (Mistral-7B, Gem
 2. Open the *pre_3_compute_activations.ipynb* notebook and fill in the config cell (easily found by the header name in the table of contents).
 3. Run the notebook *pre_3_compute_activations.ipynb*.
 
-**Important**: the notebook expects the base and finetuned model to have identical tokenizer vocabularies. If this is not the case, you will see it something like this as a result of the *Tokenizers test* section execution:
-![[Pasted image 20240930164212.png]]
+**Important**: the notebook expects the base and finetuned model to have identical tokenizer vocabularies. If this is not the case, you will see something like this as a result of the *Tokenizers test* section execution:
+| Metric                         | Value      |
+|--------------------------------|------------|
+| Base Tokenizer Size            | 50257.00000 |
+| Fine-tune Tokenizer Size       | 50257.00000 |
+| Keys only in Base              | 37309.00000 |
+| Keys only in Fine-tune         | 37309.00000 |
+| Keys with Mismatched Token IDs | 12946.00000 |
+| Good Tokens in Base (%)        | 0.00398     |
+| Good Tokens in Fine-tune (%)   | 0.00398     |
+
 By "Keys" here we mean text strings (that get mapped to their *values*: integer token ids), and the `Good tokens in model X` is defined as `X_vocab_size - tokens_only_in_X - same_tokens_with_different_ids'.
 
 **Note that the notebook will still continue to run** because it uses the same tokenizer from the base model for **both base and finetuned** models. The way it works technically is that the input text is tokenized by the base tokenizer to get the input tokens ids, and **the same token ids** **are passed to the finetuned model**. This doesn't make any sense if the finetuned model has different vocabulary!
