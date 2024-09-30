@@ -24,25 +24,27 @@ In all our notebooks, you'll need to fill in the following (hard-coded) config i
 2. **`DATASET_NAME`**:  
    Defines the dataset of the corresponding SAE (e.g. `"ctigges/openwebtext-gemma-1024-cl"`). It's used only for logging purposes, because **all the notebooks use the training dataset of the corresponding SAE by default**.
 	   - If you want to use other datasets, you can load (or create) your custom HF dataset and pass it as a parameter to the `activation_store` instance ([SAELens object](https://jbloomaus.github.io/SAELens/api/#sae_lens.ActivationsStore) for sampling tokenized batches from a HF dataset), like this:
+   ```
 		activation_store = ActivationsStore.from_sae(
 		    model=model,
 		    sae=sae,
 		    dataset=your_hf_dataset,
 		    ...
-3. **`BASE_TOKENIZER_NAME`**:  
+   ```
+4. **`BASE_TOKENIZER_NAME`**:  
    Refers to the tokenizer name of the `BASE_MODEL`. Should be a valid HF repo name that contains tokenizer files (typically the same repo as the base language model, e.g. `google/gemma-2b`). It is used only in *pre_3_compute_activations.ipynb* notebook to compare tokenizers of the base and finetuned models.
-4. **`FINETUNE_MODEL`**:  
+5. **`FINETUNE_MODEL`**:  
    Identifier of the finetuned model (e.g., `'shahdishank/gemma-2b-it-finetune-python-codes'`). This should be a valid HuggingFace model name from the [Model hub](https://huggingface.co/models), and the corresponding model should be a finetune of the `BASE_MODEL`.
-5. **`FINETUNE_PATH`**:  
+6. **`FINETUNE_PATH`**:  
    If you execute the *save_finetune_model.ipynb* notebook and save the model to your Google Drive, specify the path to it here. Leave it None if you want to download the finetune from the HF directly.
-6. **`RELEASE`**:  
+7. **`RELEASE`**:  
    Name of the SAE release for the `BASE_MODEL`. Must be [one of the supported SAELens releases](https://jbloomaus.github.io/SAELens/sae_table/).
    
    The two remaining parameters are only meant to be used for SAEs trained on **residual streams**. They are used for `sae_id` variable definition to load a residual SAE. **Please modify your `sae_id` variable in the notebooks *4_sae_eval.ipynb* and *5_features_transfer.ipynb* if your want to use SAEs for other kinds of model activations.**
    
-7. **`hook_part`**:  
+8. **`hook_part`**:  
    Specifies the part of the residual stream for hooking: `'post'` or `'pre'`, depending on your `sae_id` format.
-8. **`layer_num`**:  
+9. **`layer_num`**:  
    Specifies the residual layer number of the corresponding SAE.
    
 Currently, the config cells are prefilled to work with 3 models (Mistral-7B, Gemma-2b, GPT2-small), but you can edit them with whatever valid values you like.
