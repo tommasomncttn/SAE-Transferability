@@ -103,5 +103,7 @@ We use [ActivationStore](https://jbloomaus.github.io/SAELens/api/#sae_lens.Activ
 - `context_size`: the length of the text sequences to run through the model. Defaults to the `context_size` that the corresponding SAE was trained on (revealed by its config that is returned by SAE.from_pretrained() method from SAELens)
 - `total_batches` (and its variations): all our experiment have this parameter (defined either as a function parameter or as a global variable) to control how my 'outer batches' to run through the model sequentially. We'd like to run all the 256K tokens through the model at once, but unluckily our VRAM is not infinite! That's why we adjusted this parameter for each experiment to control **how many forward passes to perform with our `[store_batch_size_prompts, context_size]`-shaped inputs.**
 
+Thus, the total tokens count used in our sample(s) is defined as `total_batches * store_batch_size_prompts * context_size`.
+
 # Other code
 There's a bunch of other scripts/notebooks in the repo, but they are poorly documented and were used mostly for prototyping or when we tried to run our experiments on the remote cluster (*saetuning* folder). You can check them if you want, but we have warned you! :D
