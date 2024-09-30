@@ -252,7 +252,7 @@ class FeatureDensityPlotter:
 from transformer_lens import HookedTransformer
 from functools import partial
 
-def get_substitution_loss(tokens, model, sae, sae_hook, model_name, reconstruction_metric=None):
+def get_substitution_loss(tokens, model, sae, sae_layer, reconstruction_metric=None):
     '''
     Expects a tensor of input tokens of shape [N_BATCHES, N_CONTEXT].
 
@@ -261,20 +261,17 @@ def get_substitution_loss(tokens, model, sae, sae_hook, model_name, reconstructi
     2. Substitution loss - loss when substituting SAE reconstructions of the residual stream at the SAE layer of the model.
     '''
     # Run the model with cache to get the original activations and clean loss
-    loss_clean, cache = model.run_with_cache(tokens, names_filter=[sae_hook], return_type="loss")
+    loss_clean, cache = model.run_with_cache(tokens, names_filter=[sae_layer], return_type="loss")
 
     # Fetch and detach the original activations
-    original_activations = cache[sae_hook]
+    original_activations = cache[sae_layer]
 
     # Apply activation filtering
-    activations_filtered, filter_mask = filter_activations(original_activations, model_name=model_name, return_mask=True)
+    activations_filtered, filter_mask = filter_activations(original_activations, return_mask=True)
     # Shape of activations_filtered is now [valid_activations, d_model]
 
-    # Filter the tokens using the same mask
-    tokens_filtered = tokens[filter_mask].reshape(activations_filtered.shape[0]) # shape [valid_activations]
-
     # Get the SAE reconstructed activations
-    post_reconstructed = sae.forward(activations_filtered) # shape [valid_activations, d_model]
+    post_reconstructed = sae.forward(activations_filtered)# shape [valid_activations, d_model]
 
     # Update the reconstruction quality metric, if provided
     if reconstruction_metric:
@@ -284,16 +281,31 @@ def get_substitution_loss(tokens, model, sae, sae_hook, model_name, reconstructi
     del original_activations, activations_filtered, cache
     clear_cache()
 
-    # Hook function to substitute activations with SAE reconstructions
-    def hook_function(activations, hook, new_activations):
-        activations.copy_(new_activations)  # Perform in-place substitution of activations
+    # Modified hook function
+    def hook_function(activations, hook, new_activations, filter_mask):
+        # activations: [batch_size, seq_len, d_model]
+        # filter_mask: [batch_size, seq_len]
+        # new_activations: [valid_activations, d_model]
+
+        # Flatten activations and filter_mask
+        activations_flat = activations.view(-1, activations.shape[-1])
+        filter_mask_flat = filter_mask.view(-1)
+
+        # Replace activations at positions specified by filter_mask
+        activations_flat[filter_mask_flat] = new_activations
+
+        # Reshape back to original shape
+        activations = activations_flat.view(activations.shape)
+
         return activations
+
+    post_reconstructed = post_reconstructed.half() # Reduce to fp16 because we'll splice it in to the model
 
     # Run the model again with hooks to substitute activations at the SAE layer
     loss_reconstructed = model.run_with_hooks(
-        tokens_filtered,
+        tokens,
         return_type="loss",
-        fwd_hooks=[(sae_hook, partial(hook_function, new_activations=post_reconstructed))]
+        fwd_hooks=[(sae_layer, partial(hook_function, new_activations=post_reconstructed, filter_mask=filter_mask))]
     )
 
     # Clean up the reconstructed activations and clear memory
@@ -370,32 +382,35 @@ def is_act_outlier(act_tensor, model_name):
 
     Returns a boolean tensor of shape [*], where for each batch position we report whether the corresponding activation
     exceeds the outlier threshold that is defined as
-    
+
     threshold = threshold_multiplier * base_threshold, where
     base_threshold = sqrt(D_MODEL)
     --
-    OR
+    OR, if the **absolute_threshhold** is provided in the cfg
     --
-    threshold = norm_scalar * absolute_threshhold,
-    if the absolute_threshhold is provided for the model
+    threshold = absolute_threshhold,
 
-    Important! This threshold value is in the normalized scale, i.e. is meant to be used for activations that are scaled
-    in such a way, that their average norm is equal to sqrt(D_MODEL). To do this normalization, we multiple by norm_scalar
-    of the corresponding model.
+    The first case is meant to be used with activations in the normalized scale, i.e. scaled in such a way, 
+    that their average norm is equal to sqrt(D_MODEL). To do this normalization, we multiple by norm_scalar
+    of the corresponding model, which is computed in the find_outlier_norms.ipynb.
 
     Check this blog-post for more details: https://www.lesswrong.com/posts/fmwk6qxrpW8d4jvbd/saes-usually-transfer-between-base-and-chat-models
     """
+
+    absolute_threshhold = get_absolute_threshhold(model_name)
+
     norm_scalar = get_norm_scalar(model_name)
     threshold_multiplier = get_threshold_multiplier(model_name)
     base_threshold = get_base_threshhold(model_name)
-    absolute_threshhold = get_absolute_threshhold(model_name)
-
+    
+    # Define the threshold value and the activations scale, depending on the threshold type
     if absolute_threshhold:
-        threshold = norm_scalar * absolute_threshhold
-    else:
+        threshold = absolute_threshhold
+        scaled_act = act_tensor
+    else: # relative threshold case
         threshold = threshold_multiplier * base_threshold
+        scaled_act = norm_scalar * act_tensor
 
-    scaled_act = norm_scalar * act_tensor
     scaled_act_norms = torch.norm(scaled_act, dim=-1)
 
     return scaled_act_norms > threshold
