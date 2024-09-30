@@ -89,7 +89,9 @@ P.S. sometimes the finetuned model is extended with just a few new tokens in the
 1. Run the *4_sae_eval.ipynb* notebook to compute feature densities.
 2. Open the *5_features_transfer.ipynb* notebook and fill in its config cell.
 3. Specify how many features to sample in the *Sampling features from density intervals* section.
-4. Run the *5_features_transfer.ipynb* notebook.
+	- DENSE_COUNT: how many 'regular' features to sample. By default, a regular feature is a feature with log10 density from -5 to -1, but you can modify these bounds.
+	- DEAD_COUNT: how many exclusively dead features to sample (i.e. features that are dead either in the finetuned or the base model, but not both). It serves as an upper bound: if the actual number of dead features is smaller than DEAD_COUNT, the actual number will be used (for both exclusively-dead-base and -finetune features)
+5. Run the *5_features_transfer.ipynb* notebook.
 
 Thus, our notebooks have the following dependencies in terms of data input/outputs:
 - *pre_3_compute_activations.ipynb* -> *3_compute_similarities.ipynb*
